@@ -1,0 +1,251 @@
+"""
+Helpers pour la gestion du contexte multi-CMF sécurisé
+Assure que chaque page (Buyer, CM, SQD) fonctionne sur le CMF correctement sélectionné
+"""
+
+from typing import Optional, Tuple, List
+from pathlib import Path
+
+import streamlit as st
+
+from models.project_schema import Project
+from services.project_repository import JSONProjectRepository
+from services.excel_service import ExcelService
+
+
+# ==================== CMF CONTEXT MANAGEMENT ====================
+def get_user_accessible_cmfs(
+    user_id: str,
+    user_role: str,
+    force_repo: bool = False
+) -> List[Project]:
+    """
+    Récupère les CMF accessibles par un utilisateur selon son rôle.
+    
+    Args:
+        user_id: Identifiant utilisateur
+        user_role: Rôle ('BUYER', 'CAPACITY_MANAGER', 'SQD', 'ADMIN')
+        force_repo: Si True, recrée la repo (pour test)
+    
+    Returns:
+        Liste des CMF accessibles
+    """
+    try:
+        repo = JSONProjectRepository()
+        all_cmfs = repo.get_all_projects()
+        
+        if not all_cmfs:
+            return []
+        
+        # Admin voit tous les CMF
+        if user_role == "ADMIN":
+            return all_cmfs
+        
+        # Buyer voit ses CMF assignés
+        if user_role == "BUYER":
+            return [cmf for cmf in all_cmfs if cmf.buyer_assigned == user_id]
+        
+        # CM voit tous les CMF (pour gestion globale)
+        if user_role == "CAPACITY_MANAGER":
+            return all_cmfs
+        
+        # SQD voit ses CMF assignés
+        if user_role == "SQD":
+            return [cmf for cmf in all_cmfs if cmf.sqd_assigned == user_id]
+        
+        return []
+    
+    except Exception as e:
+        st.error(f"❌ Error loading CMF list: {str(e)}")
+        return []
+
+
+def ensure_cmf_selected(
+    page_name: str,
+    user_id: str,
+    user_role: str,
+    require_cmf: bool = True
+) -> Optional[Tuple[Project, ExcelService]]:
+    """
+    Assure qu'un CMF est sélectionné avant la saisie de données.
+    
+    Workflow:
+    1. Récupère les CMF accessibles
+    2. Affiche un selectbox pour choisir le CMF
+    3. Sauvegarde la sélection dans session_state
+    4. Instancie ExcelService pour ce CMF
+    5. Retourne CMF + ExcelService
+    
+    Args:
+        page_name: Nom de la page ('Buyer', 'Capacity Manager', 'SQD')
+        user_id: Identifiant utilisateur
+        user_role: Rôle utilisateur
+        require_cmf: Si True, bloque l'accès sans CMF sélectionné
+    
+    Returns:
+        Tuple(selected_cmf: Project, excel_service: ExcelService) si succès
+        None si aucun CMF accessible ou erreur
+    
+    Side Effects:
+        - Affiche le selectbox CMF
+        - Sauvegarde dans st.session_state['selected_cmf_id']
+        - Sauvegarde le chemin du fichier Excel
+    
+    Examples:
+        >>> result = ensure_cmf_selected("Buyer", "john_buyer", "BUYER")
+        >>> if result is None:
+        ...     st.stop()
+        >>> selected_cmf, excel_service = result
+    """
+    
+    # Récupérer les CMF accessibles
+    available_cmfs = get_user_accessible_cmfs(user_id, user_role)
+    
+    if not available_cmfs:
+        if require_cmf:
+            st.error(f"❌ No CMF available for you. Contact your administrator.")
+            st.stop()
+        else:
+            st.warning(f"⚠️ No CMF available for you.")
+            return None
+    
+    # Afficher le selectbox CMF en haut de la page
+    st.subheader(f"📁 Select CMF for {page_name}")
+    
+    cmf_options = {
+        f"{cmf.project_code} – {cmf.project_name}": cmf.project_id 
+        for cmf in available_cmfs
+    }
+    
+    # Récupérer la sélection current de session_state
+    current_cmf_id = st.session_state.get('selected_cmf_id')
+    
+    # Si current CMF n'est plus dans les options, réinitialiser
+    if current_cmf_id and current_cmf_id not in cmf_options.values():
+        st.session_state['selected_cmf_id'] = None
+        current_cmf_id = None
+    
+    # Default au premier CMF
+    if not current_cmf_id:
+        current_cmf_id = list(cmf_options.values())[0] if cmf_options else None
+    
+    # Afficher le selectbox
+    selected_cmf_display = st.selectbox(
+        label="Select which CMF to work on",
+        options=list(cmf_options.keys()),
+        index=(
+            list(cmf_options.values()).index(current_cmf_id) 
+            if current_cmf_id in cmf_options.values() 
+            else 0
+        ),
+        key=f"cmf_selector_{page_name.lower()}"
+    )
+    
+    # Récupérer le CMF sélectionné
+    selected_cmf_id = cmf_options[selected_cmf_display]
+    selected_cmf = next(
+        (cmf for cmf in available_cmfs if cmf.project_id == selected_cmf_id),
+        None
+    )
+    
+    if selected_cmf is None:
+        st.error("❌ Selected CMF not found. Please try again.")
+        return None
+    
+    # Sauvegarder dans session_state
+    st.session_state['selected_cmf_id'] = selected_cmf_id
+    st.session_state['selected_cmf'] = selected_cmf
+    
+    # Afficher le contexte
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("👤 Code", selected_cmf.project_code)
+    with col2:
+        st.metric("🏭 Supplier", selected_cmf.supplier_name or "N/A")
+    with col3:
+        st.metric("📥 Buyer", selected_cmf.buyer_assigned or "Not assigned")
+    with col4:
+        st.metric("✅ SQD", selected_cmf.sqd_assigned or "Not assigned")
+    
+    st.divider()
+    
+    # Instancier ExcelService pour ce CMF
+    try:
+        if not selected_cmf.cmf_file_path:
+            st.error(f"❌ CMF file path not found for {selected_cmf.project_code}")
+            return None
+        
+        excel_service = ExcelService(str(selected_cmf.cmf_file_path))
+        st.session_state['current_excel_service'] = excel_service
+        st.session_state['current_cmf_file_path'] = str(selected_cmf.cmf_file_path)
+        
+        # Debug: Afficher le chemin du fichier utilisé
+        with st.expander("📝 Debug Info"):
+            st.caption(f"CMF File: {selected_cmf.cmf_file_path}")
+            st.caption(f"Role: {user_role}")
+        
+        return selected_cmf, excel_service
+    
+    except Exception as e:
+        st.error(f"❌ Error loading CMF file: {str(e)}")
+        return None
+
+
+def get_current_excel_service() -> Optional[ExcelService]:
+    """
+    Récupère l'ExcelService actuel depuis session_state.
+    
+    Returns:
+        ExcelService si disponible, None sinon
+    """
+    return st.session_state.get('current_excel_service')
+
+
+def get_current_cmf() -> Optional[Project]:
+    """
+    Récupère le CMF actuel sélectionné.
+    
+    Returns:
+        Project si sélectionné, None sinon
+    """
+    return st.session_state.get('selected_cmf')
+
+
+def log_data_entry_attempt(
+    page_name: str,
+    action: str,
+    record_count: int,
+    status: str,
+    error_msg: str = None
+) -> None:
+    """
+    Log une tentative de saisie de données (pour debug).
+    
+    Args:
+        page_name: Page d'origine ('Buyer', 'CM', 'SQD')
+        action: Action effectuée ('add_record', 'import_file', etc.)
+        record_count: Nombre de records
+        status: 'SUCCESS', 'FAILED', 'PARTIAL'
+        error_msg: Message d'erreur si applicable
+    """
+    
+    cmf = get_current_cmf()
+    if not cmf:
+        st.warning("⚠️ No CMF selected for logging")
+        return
+    
+    log_entry = {
+        "date": st.session_state.get("_time"),
+        "page": page_name,
+        "cmf_code": cmf.project_code,
+        "action": action,
+        "records": record_count,
+        "status": status,
+        "error": error_msg,
+    }
+    
+    # Optionnel: Sauvegarder dans session ou logs
+    if 'data_entry_logs' not in st.session_state:
+        st.session_state['data_entry_logs'] = []
+    
+    st.session_state['data_entry_logs'].append(log_entry)

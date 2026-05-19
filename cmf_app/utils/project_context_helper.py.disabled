@@ -1,0 +1,373 @@
+"""
+Utilitaires pour intégration du contexte projet dans les pages Streamlit
+Fournit des helpers pour vérifier l'accès et initialiser les services au niveau du projet
+"""
+
+import streamlit as st
+from typing import Optional, Dict, Any
+from services import ExcelService, get_audit_service
+from models.project_schema import ProjectContext, UserProjectRole
+from config.settings import UserRole
+
+
+def require_project_context() -> ProjectContext:
+    """
+    Vérifie que l'utilisateur a un contexte projet valide.
+    À appeler au début de chaque page.
+    
+    Returns:
+        ProjectContext si valide
+    
+    Raises:
+        RuntimeError si contexte invalide
+    """
+    # Check user is logged in
+    if not st.session_state.get("current_user"):
+        st.error("Login required.")
+        st.stop()
+    
+    # Check project selected
+    context = st.session_state.get("project_context")
+    if not context or not context.selected_project:
+        st.error("Project selection required.")
+        st.stop()
+    
+    return context
+
+
+def require_role(required_role: str) -> ProjectContext:
+    """
+    Vérifie que l'utilisateur a le rôle requis sur le projet actif.
+    À appeler après require_project_context().
+    
+    Args:
+        required_role: Rôle requis (BUYER, CAPACITY_MANAGER, SQD, ADMIN)
+    
+    Returns:
+        ProjectContext si accès autorisé
+    
+    Raises:
+        RuntimeError si rôle insuffisant
+    """
+    context = require_project_context()
+    
+    # Admin has access to everything
+    if context.user_role == UserRole.ADMIN:
+        return context
+    
+    # Check exact role
+    if context.user_role != required_role:
+        st.error(f"Role '{required_role}' required. You have '{context.user_role}'.")
+        st.stop()
+    
+    return context
+
+
+def require_any_role(*allowed_roles: str) -> ProjectContext:
+    """
+    Vérifie que l'utilisateur a l'un des rôles autorisés.
+    
+    Args:
+        *allowed_roles: Rôles autorisés
+    
+    Returns:
+        ProjectContext si accès autorisé
+    """
+    context = require_project_context()
+    
+    # Admin has access to everything
+    if context.user_role == UserRole.ADMIN:
+        return context
+    
+    # Check if user has one of the allowed roles
+    if context.user_role not in allowed_roles:
+        roles_str = ", ".join(allowed_roles)
+        st.error(f"One of these roles required: {roles_str}. You have '{context.user_role}'.")
+        st.stop()
+    
+    return context
+
+
+def get_project_excel_service() -> ExcelService:
+    """
+    Récupère le service Excel pour le projet actif.
+    
+    Returns:
+        ExcelService initialisé avec le CMF du projet actuel
+    """
+    context = require_project_context()
+    
+    if not context.selected_project:
+        raise ValueError("No project selected")
+    
+    return ExcelService(context.selected_project.cmf_file_path)
+
+
+def get_project_audit_service():
+    """
+    Récupère le service d'audit avec le contexte projet.
+    
+    Returns:
+        AuditService
+    """
+    return get_audit_service()
+
+
+def log_project_action(
+    action: str,
+    details: str = "",
+    record_id: Optional[int] = None,
+    **kwargs
+):
+    """
+    Enregistre une action d'audit avec le contexte projet.
+    
+    Args:
+        action: Type d'action (CREATE, UPDATE, DELETE, etc.)
+        details: Description détaillée
+        record_id: ID d'enregistrement affecté
+        **kwargs: Paramètres additionnels
+    """
+    context = st.session_state.get("project_context")
+    user = st.session_state.get("current_user")
+    role = st.session_state.get("user_role")
+    
+    if context and user and role:
+        audit_service = get_project_audit_service()
+        audit_service.log_action(
+            action=action,
+            user=user,
+            role=str(role),
+            table="CMF",
+            record_id=record_id,
+            details=details,
+            project_id=context.selected_project.project_id if context.selected_project else None,
+            **kwargs
+        )
+
+
+class ProjectPageTemplate:
+    """
+    Classe helper pour initialiser les pages Streamlit avec support multi-projet.
+    
+    Usage:
+        page = ProjectPageTemplate("Buyer – Entry", required_role="BUYER")
+        if not page.initialize():
+            st.stop()
+        
+        excel_service = page.get_excel_service()
+        page.log_action("CREATE_RECORD", "Created new record")
+    """
+    
+    def __init__(self, page_title: str, required_role: Optional[str] = None):
+        """
+        Args:
+            page_title: Titre de la page
+            required_role: Rôle requis (BUYER, CAPACITY_MANAGER, SQD, ADMIN, None)
+        """
+        self.page_title = page_title
+        self.required_role = required_role
+        self.context = None
+        self.excel_service = None
+    
+    def initialize(self) -> bool:
+        """
+        Initialise la page avec les vérifications d'accès.
+        A appeler au début de chaque page.
+        
+        Returns:
+            True si initialisation OK, False sinon
+        """
+        try:
+            # Check login
+            if not st.session_state.get("current_user"):
+                st.error("❌ Login required.")
+                return False
+            
+            # Check project selected
+            context = st.session_state.get("project_context")
+            if not context or not context.selected_project:
+                st.error("❌ Project selection required. Please go back and select a project.")
+                return False
+            
+            # Check role if specified
+            if self.required_role and self.required_role != UserRole.ADMIN:
+                if context.user_role == UserRole.ADMIN:
+                    # Admin has access to everything
+                    pass
+                elif context.user_role != self.required_role:
+                    st.error(
+                        f"❌ Access Denied\n"
+                        f"Required role: **{self.required_role}**\n"
+                        f"Your role: **{context.user_role}**"
+                    )
+                    return False
+            
+            self.context = context
+            self.excel_service = ExcelService(context.selected_project.cmf_file_path)
+            
+            # Display project header
+            self._display_header()
+            
+            return True
+        
+        except Exception as e:
+            st.error(f"❌ Initialization error: {str(e)}")
+            return False
+    
+    def _display_header(self):
+        """Affiche l'en-tête avec les informations du projet."""
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.caption(
+                f"📁 **{self.context.selected_project.project_name}** | "
+                f"👤 {self.context.current_user} | "
+                f"🔐 {self.context.user_role}"
+            )
+        with col2:
+            if st.button("📋 Change Project"):
+                st.session_state.project_context = None
+                st.rerun()
+    
+    def get_context(self) -> ProjectContext:
+        """Récupère le contexte projet actif."""
+        if not self.context:
+            raise ValueError("Project context not initialized")
+        return self.context
+    
+    def get_excel_service(self) -> ExcelService:
+        """Récupère le service Excel pour le projet actif."""
+        if not self.excel_service:
+            self.excel_service = ExcelService(
+                self.context.selected_project.cmf_file_path
+            )
+        return self.excel_service
+    
+    def get_audit_service(self):
+        """Récupère le service d'audit avec le contexte projet."""
+        return get_audit_service()
+    
+    def log_action(
+        self,
+        action: str,
+        details: str = "",
+        record_id: Optional[int] = None,
+        **kwargs
+    ):
+        """
+        Enregistre une action d'audit avec le contexte projet.
+        
+        Args:
+            action: Type d'action (CREATE_RECORD, UPDATE_RECORD, DELETE_RECORD, etc.)
+            details: Description détaillée
+            record_id: ID d'enregistrement affecté
+            **kwargs: Paramètres additionnels
+        """
+        if not self.context:
+            return
+        
+        audit_service = self.get_audit_service()
+        audit_service.log_action(
+            action=action,
+            user=self.context.current_user,
+            role=str(self.context.user_role),
+            table="CMF",
+            record_id=record_id,
+            details=details,
+            project_id=self.context.selected_project.project_id,
+            **kwargs
+        )
+
+
+def display_project_header():
+    """
+    Affiche le header du projet avec information d'accès.
+    À appeler après require_project_context().
+    """
+    context = st.session_state.get("project_context")
+    
+    if context and context.selected_project:
+        col1, col2, col3 = st.columns([3, 1, 1])
+        with col1:
+            st.caption(f"Project: **{context.selected_project.project_name}**")
+        with col2:
+            st.caption(f"Role: {context.user_role}")
+        with col3:
+            st.caption(f"User: {st.session_state.get('current_user')}")
+
+
+class ProjectPageTemplate:
+    """
+    Template pour les pages Streamlit compatibles multi-projets.
+    Fournit les vérifications d'accès et l'initialisation standard.
+    """
+    
+    def __init__(self, page_title: str, required_role: Optional[str] = None):
+        """
+        Initialise le template.
+        
+        Args:
+            page_title: Titre de la page
+            required_role: Rôle requis (optionnel)
+        """
+        self.page_title = page_title
+        self.required_role = required_role
+        self.context = None
+        self.excel_service = None
+    
+    def initialize(self) -> bool:
+        """
+        Initialise la page avec vérifications d'accès.
+        À appeler au début de la page.
+        
+        Returns:
+            True si initialization successful
+        """
+        # Check project context
+        self.context = require_project_context()
+        
+        # Check role if required
+        if self.required_role:
+            require_role(self.required_role)
+        
+        # Initialize services
+        self.excel_service = get_project_excel_service()
+        
+        # Display header
+        display_project_header()
+        
+        return True
+    
+    def log_action(self, action: str, details: str = "", record_id: Optional[int] = None):
+        """Enregistre une action d'audit"""
+        log_project_action(action, details, record_id)
+    
+    def get_context(self) -> ProjectContext:
+        """Retourne le contexte projet"""
+        return self.context
+    
+    def get_excel_service(self) -> ExcelService:
+        """Retourne le service Excel du projet"""
+        return self.excel_service
+
+
+# Example usage in a page:
+"""
+from utils.project_context_helper import ProjectPageTemplate, require_role
+import streamlit as st
+
+# Initialize page
+page = ProjectPageTemplate("Buyer Entry", required_role="BUYER")
+if not page.initialize():
+    st.stop()
+
+# Now safe to use project-aware services
+records = page.get_excel_service().read_cmf_records()
+
+# Log actions
+page.log_action("IMPORT", "Imported 50 records from file", record_id=None)
+
+# Access context
+context = page.get_context()
+st.write(f"Active project: {context.selected_project.project_name}")
+"""

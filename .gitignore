@@ -1,0 +1,11 @@
+react-ui/node_modules/
+react-ui/dist/
+react-ui/tsconfig.tsbuildinfo
+react-ui/.env.local
+
+cmf_app/__pycache__/
+cmf_app/**/__pycache__/
+*.pyc
+
+.DS_Store
+Thumbs.db

@@ -1,0 +1,6 @@
+streamlit==1.28.1
+pandas==2.1.1
+openpyxl==3.10.10
+python-dotenv==1.0.0
+fastapi==0.124.2
+uvicorn[standard]==0.38.0

@@ -8,6 +8,7 @@ from services.master_schema import (
     AUTO_COLUMNS,
     STANDARD_COLUMNS_ORDER,
     STANDARD_COLUMNS_WITH_ROLES,
+    get_column_section,
     get_column_roles,
 )
 
@@ -20,6 +21,7 @@ class ProjectColumn:
     owner_role: str
     is_auto: int = 0
     display_order: int = 0
+    custom_section: Optional[str] = None
 
     @classmethod
     def from_row(cls, row) -> "ProjectColumn":
@@ -31,6 +33,7 @@ class ProjectColumn:
             owner_role=row["owner_role"] if "owner_role" in keys else cls._derive_owner_from_db(row),
             is_auto=row["is_auto"],
             display_order=row["display_order"],
+            custom_section=row["custom_section"] if "custom_section" in keys else None,
         )
 
     @staticmethod
@@ -119,6 +122,8 @@ class ProjectColumnRepository:
         column_names = {row["name"] for row in cur.fetchall()}
         if "owner_role" not in column_names:
             conn.execute("ALTER TABLE project_columns ADD COLUMN owner_role TEXT")
+        if "custom_section" not in column_names:
+            conn.execute("ALTER TABLE project_columns ADD COLUMN custom_section TEXT")
 
     def clear_project_columns(self, project_id: int) -> None:
         conn = get_connection()
@@ -140,14 +145,15 @@ class ProjectColumnRepository:
                 conn.execute(
                     """
                     INSERT INTO project_columns (
-                        project_id, column_name, owner_role, is_auto, display_order
-                    ) VALUES (?, ?, ?, ?, ?)
+                        project_id, column_name, owner_role, is_auto, display_order, custom_section
+                    ) VALUES (?, ?, ?, ?, ?, ?)
                     ON CONFLICT(project_id, column_name) DO UPDATE SET
                         owner_role = excluded.owner_role,
                         is_auto = excluded.is_auto,
-                        display_order = excluded.display_order
+                        display_order = excluded.display_order,
+                        custom_section = excluded.custom_section
                     """,
-                    (project_id, str(column_name).strip(), owner_role, int(is_auto), int(display_order)),
+                    (project_id, str(column_name).strip(), owner_role, int(is_auto), int(display_order), get_column_section(str(column_name).strip())),
                 )
         finally:
             close_connection(conn)
@@ -187,14 +193,15 @@ class ProjectColumnRepository:
                     conn.execute(
                         """
                         INSERT INTO project_columns (
-                            project_id, column_name, owner_role, is_auto, display_order
-                        ) VALUES (?, ?, ?, ?, ?)
+                            project_id, column_name, owner_role, is_auto, display_order, custom_section
+                        ) VALUES (?, ?, ?, ?, ?, ?)
                         ON CONFLICT(project_id, column_name) DO UPDATE SET
                             owner_role = excluded.owner_role,
                             is_auto = excluded.is_auto,
-                            display_order = excluded.display_order
+                            display_order = excluded.display_order,
+                            custom_section = excluded.custom_section
                         """,
-                        (project_id, col_name, owner_role, is_auto, idx),
+                        (project_id, col_name, owner_role, is_auto, idx, col_def["section"]),
                     )
                     conn.execute(
                         """
@@ -226,6 +233,7 @@ class ProjectColumnRepository:
         display_order: int = 0,
         can_edit: int = 1,
         owner_role: Optional[str] = None,
+        custom_section: Optional[str] = None,
     ) -> List[ProjectColumn]:
         """Insert or update one project column and its edit permissions."""
         normalized_column = str(column_name).strip()
@@ -234,6 +242,7 @@ class ProjectColumnRepository:
 
         roles = self._normalize_roles(owner_roles=owner_roles, owner_role=owner_role)
         primary_owner_role = self._derive_owner_role(roles, int(is_auto))
+        section = str(custom_section or get_column_section(normalized_column)).strip() or "CUSTOMIZED COLUMNS"
 
         conn = get_connection()
         try:
@@ -242,14 +251,15 @@ class ProjectColumnRepository:
             cur.execute(
                 """
                 INSERT INTO project_columns (
-                    project_id, column_name, owner_role, is_auto, display_order
-                ) VALUES (?, ?, ?, ?, ?)
+                    project_id, column_name, owner_role, is_auto, display_order, custom_section
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(project_id, column_name) DO UPDATE SET
                     owner_role = excluded.owner_role,
                     is_auto = excluded.is_auto,
-                    display_order = excluded.display_order
+                    display_order = excluded.display_order,
+                    custom_section = excluded.custom_section
                 """,
-                (project_id, normalized_column, primary_owner_role, int(is_auto), int(display_order)),
+                (project_id, normalized_column, primary_owner_role, int(is_auto), int(display_order), section),
             )
 
             cur.execute(
@@ -309,6 +319,7 @@ class ProjectColumnRepository:
                 "owner_role": column.owner_role,
                 "is_auto": column.is_auto,
                 "display_order": column.display_order,
+                "custom_section": column.custom_section,
             }
             for column in self.get_project_columns(project_id)
         ]

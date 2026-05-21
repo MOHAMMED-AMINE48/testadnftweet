@@ -782,6 +782,12 @@ th {
   font-weight: 800;
 }
 
+.empty-cell {
+  display: inline-block;
+  min-width: 30px;
+  min-height: 26px;
+}
+
 .green {
   background: #ddf7ec;
   color: #14805e;
@@ -970,6 +976,10 @@ th {
   border: 1px solid #dfe7f1;
   border-radius: 8px;
   background: #fbfcfe;
+}
+
+.custom-column-row {
+  grid-template-columns: minmax(180px, 1fr) 18px minmax(150px, 0.7fr) minmax(210px, 1fr) auto;
 }
 
 .admin-create {

@@ -348,6 +348,7 @@ def init_db() -> None:
                 owner_role TEXT NOT NULL,
                 is_auto INTEGER NOT NULL DEFAULT 0,
                 display_order INTEGER NOT NULL,
+                custom_section TEXT,
                 UNIQUE(project_id, column_name),
                 FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
             );

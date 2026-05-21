@@ -27,6 +27,7 @@ STANDARD_COLUMNS_WITH_ROLES: List[ColumnDef] = [
     {"name": "N° FAC / RFQ /PD LETTER", "section": "PART DATA", "roles": _roles("BUYER"), "is_auto": False},
     {"name": "USE CASES", "section": "PART DATA", "roles": _roles("SQD"), "is_auto": False},
     {"name": "PART NUMBER", "section": "PART DATA", "roles": _roles("BUYER", "SQD"), "is_auto": False},
+    {"name": "PART NAME", "section": "PART DATA", "roles": _roles("BUYER"), "is_auto": False},
     {
         "name": "PROCESS PART COEFFICIENT (precise definition: link between capacity and parts / vehicle production program)",
         "section": "PART DATA",
@@ -76,7 +77,7 @@ STANDARD_COLUMNS_WITH_ROLES: List[ColumnDef] = [
     {"name": "MIX (%)", "section": "CAPACITY SIZING", "roles": _roles("BUYER", "CAPACITY_MANAGER"), "is_auto": False},
     {"name": "LAST WEEKLY CAPACITY REQUESTED", "section": "CAPACITY SIZING", "roles": _roles("CAPACITY_MANAGER"), "is_auto": False},
     {"name": "CAPACITY STEP (parts/week)", "section": "CAPACITY SIZING", "roles": _roles("CAPACITY_MANAGER"), "is_auto": False},
-    {"name": "PEAK YEAR", "section": "CAPACITY SIZING", "roles": _roles("CAPACITY_MANAGER"), "is_auto": False},
+    {"name": "CAPACITY SOURCE", "section": "CAPACITY SIZING", "roles": _roles("CAPACITY_MANAGER"), "is_auto": False},
 
     # CAPACITY WORKSHOP (STEP 2)
     {"name": "SUPERMIX ACTIVITY OUI/NON", "section": "CAPACITY WORKSHOP (STEP 2)", "roles": _roles("CAPACITY_MANAGER"), "is_auto": False},

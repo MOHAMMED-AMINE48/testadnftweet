@@ -68,6 +68,8 @@ REACT_DEFAULT_VIEW_COLS = [
     "CAT1/2/3 VALUATION (G;O;R)",
 ]
 REACT_SECTION_MARKER_COLUMNS = {
+    "PART DATA",
+    "PART DATA (STEP 1)",
     "SUPPLIER INFORMATION",
     "WEEKLY CONTRACTED CAPACITY",
     "CAPACITY SIZING",
@@ -75,11 +77,18 @@ REACT_SECTION_MARKER_COLUMNS = {
     "CAT",
     "CUSTOMIZED COLONNE",
 }
+GOR_COLUMN = "GOR (Green, Orange, Red) Supplier Capacity Contracted regarding Buyer"
+GOR_REQUESTED_COLUMN = "GOR (Green, Orange, Red) Supplier Capacity Contracted regarding Buyer Capacity Requested"
+CAT_VALUATION_COLUMN = "CAT1/2/3 VALUATION (G;O;R)"
+CONTRACTED_COLUMN = "WEEKLY CAPACITY CONTRACTED (Parts/Week)"
+REQUESTED_COLUMN = "LAST WEEKLY CAPACITY REQUESTED"
+MEASURED_COLUMN = "WEEKLY CAPACITY MEASURED"
 
 
 class CustomColumnPayload(BaseModel):
     column_name: str
     owner_role: str
+    section: Optional[str] = None
     actor_email: Optional[str] = None
 
 
@@ -335,6 +344,130 @@ def _ensure_users_table() -> None:
         db_sqlite.close_connection(conn)
 
 
+def _ensure_react_schema_migrations() -> None:
+    conn = db_sqlite.get_connection()
+    try:
+        with conn:
+            conn.execute(
+                """
+                UPDATE project_columns
+                SET column_name = ?
+                WHERE column_name = ?
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM project_columns AS existing
+                      WHERE existing.project_id = project_columns.project_id
+                        AND existing.column_name = ?
+                  )
+                """,
+                ("CAPACITY SOURCE", "PEAK YEAR", "CAPACITY SOURCE"),
+            )
+            conn.execute(
+                """
+                DELETE FROM project_columns
+                WHERE column_name = ?
+                  AND EXISTS (
+                      SELECT 1
+                      FROM project_columns AS existing
+                      WHERE existing.project_id = project_columns.project_id
+                        AND existing.column_name = ?
+                  )
+                """,
+                ("PEAK YEAR", "CAPACITY SOURCE"),
+            )
+            conn.execute(
+                """
+                UPDATE cmf_record_values
+                SET column_name = ?
+                WHERE column_name = ?
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM cmf_record_values AS existing
+                      WHERE existing.record_id = cmf_record_values.record_id
+                        AND existing.column_name = ?
+                  )
+                """,
+                ("CAPACITY SOURCE", "PEAK YEAR", "CAPACITY SOURCE"),
+            )
+            conn.execute(
+                """
+                DELETE FROM cmf_record_values
+                WHERE column_name = ?
+                  AND EXISTS (
+                      SELECT 1
+                      FROM cmf_record_values AS existing
+                      WHERE existing.record_id = cmf_record_values.record_id
+                        AND existing.column_name = ?
+                  )
+                """,
+                ("PEAK YEAR", "CAPACITY SOURCE"),
+            )
+            projects = conn.execute("SELECT id FROM projects").fetchall()
+            column_names = {row["name"] for row in conn.execute("PRAGMA table_info(project_columns)").fetchall()}
+            if "custom_section" not in column_names:
+                conn.execute("ALTER TABLE project_columns ADD COLUMN custom_section TEXT")
+            for col_def in STANDARD_COLUMNS_WITH_ROLES:
+                conn.execute(
+                    "UPDATE project_columns SET custom_section = ? WHERE column_name = ? AND (custom_section IS NULL OR custom_section = '')",
+                    (col_def["section"], col_def["name"]),
+                )
+            for project in projects:
+                project_id = project["id"]
+                pn_row = conn.execute(
+                    "SELECT display_order FROM project_columns WHERE project_id = ? AND column_name = ?",
+                    (project_id, "PART NUMBER"),
+                ).fetchone()
+                part_name_order = int(pn_row["display_order"] or 0) + 1 if pn_row else None
+                exists = conn.execute(
+                    "SELECT display_order FROM project_columns WHERE project_id = ? AND column_name = ?",
+                    (project_id, "PART NAME"),
+                ).fetchone()
+                if part_name_order is not None and (not exists or int(exists["display_order"] or -1) != part_name_order):
+                    conn.execute(
+                        """
+                        UPDATE project_columns
+                        SET display_order = display_order + 1
+                        WHERE project_id = ?
+                          AND display_order >= ?
+                          AND column_name != ?
+                        """,
+                        (project_id, part_name_order, "PART NAME"),
+                    )
+                if not exists:
+                    order_row = conn.execute(
+                        "SELECT COALESCE(MAX(display_order), -1) + 1 AS next_order FROM project_columns WHERE project_id = ?",
+                        (project_id,),
+                    ).fetchone()
+                    display_order = part_name_order if part_name_order is not None else int(order_row["next_order"] or 0)
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO project_columns (
+                            project_id, column_name, owner_role, is_auto, display_order
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (project_id, "PART NAME", "BUYER", 0, display_order),
+                    )
+                elif part_name_order is not None:
+                    conn.execute(
+                        """
+                        UPDATE project_columns
+                        SET display_order = ?
+                        WHERE project_id = ? AND column_name = ?
+                        """,
+                        (part_name_order, project_id, "PART NAME"),
+                    )
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO project_column_permissions (
+                        project_id, column_name, role, can_edit
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (project_id, "PART NAME", "BUYER", 1),
+                )
+    finally:
+        db_sqlite.close_connection(conn)
+
+
 def _write_audit_log(
     action: str,
     entity_type: str,
@@ -399,13 +532,13 @@ def _first_number(value: Any) -> Optional[float]:
 
 
 def _react_gor_value(row: Dict[str, Any]) -> str:
-    existing = row.get("GOR (Green, Orange, Red) Supplier Capacity Contracted regarding Buyer")
-    if existing not in (None, ""):
-        return str(existing)
-    contracted = _first_number(row.get("WEEKLY CAPACITY CONTRACTED (Parts/Week)"))
-    requested = _first_number(row.get("LAST WEEKLY CAPACITY REQUESTED"))
+    contracted = _first_number(row.get(CONTRACTED_COLUMN))
+    requested = _first_number(row.get(REQUESTED_COLUMN))
     if contracted is None or requested is None or requested <= 0:
         return ""
+    existing = row.get(GOR_COLUMN)
+    if existing not in (None, ""):
+        return str(existing)
     ratio = contracted / requested
     if ratio >= 1:
         return "G"
@@ -414,9 +547,33 @@ def _react_gor_value(row: Dict[str, Any]) -> str:
     return "R"
 
 
+def _react_cat_value(row: Dict[str, Any]) -> str:
+    contracted = _first_number(row.get(CONTRACTED_COLUMN))
+    requested = _first_number(row.get(REQUESTED_COLUMN))
+    measured = _first_number(row.get(MEASURED_COLUMN))
+    if contracted is None or requested is None or measured is None or requested <= 0:
+        return ""
+    existing = row.get(CAT_VALUATION_COLUMN)
+    if existing not in (None, ""):
+        return str(existing)
+    tolerance = max(abs(requested) * 0.05, 1e-9)
+    if abs(measured - requested) <= tolerance:
+        return "O"
+    if measured > requested:
+        return "G"
+    return "R"
+
+
 def _template_aliases(header: str) -> List[str]:
     normalized = _normalized_header(header)
     aliases = {
+        "PART DATA": ["PART DATA "],
+        "PART NAME": ["part_name"],
+        GOR_REQUESTED_COLUMN: [GOR_COLUMN],
+        "SHARED FOLDER": ["SCR - SHARED FOLDER"],
+        "SHARED FOLDER DATE (DD/MM/YYYY)": ["SCR DATE (DD/MM/YYYY)"],
+        "SCR DATE (DD/MM/YYYY)": ["SCR DATE (DD/MM/YYYY)", "SHARED FOLDER DATE (DD/MM/YYYY)"],
+        "CAPACITY SOURCE": ["PEAK YEAR"],
         "CMF LINE N°": ["CMF LINE NÂ°"],
         "N° SOURCING, RFQ,ODM,FETE …": ["NÂ° SOURCING, RFQ,ODM,FETE â€¦"],
         "PROGRAM BUYER / BUYER": ["PROGRAM BUYER / BUYER"],
@@ -466,14 +623,71 @@ def _project_label(project: Dict[str, Any]) -> str:
     return code or name
 
 
+def _roadmap_labels(limit: int = 3) -> List[str]:
+    return [_project_label(project) for project in record_repo.get_all_projects_for_cross_view()[:limit]]
+
+
+def _project_custom_column_names(project_id: int) -> List[str]:
+    names = []
+    for column in column_repo.get_columns(project_id):
+        column_name = column["column_name"]
+        if get_column_section(column_name) == "CUSTOMIZED COLUMNS" and column_name not in names:
+            names.append(column_name)
+    return names
+
+
+def _column_section_for_project(project_id: int, column_name: str) -> str:
+    standard_section = get_column_section(column_name)
+    if standard_section != "CUSTOMIZED COLUMNS":
+        return standard_section
+    for column in column_repo.get_columns(project_id):
+        if column["column_name"] == column_name:
+            return column.get("custom_section") or column.get("section") or "CUSTOMIZED COLUMNS"
+    return "CUSTOMIZED COLUMNS"
+
+
+def _is_custom_placeholder(column_name: str) -> bool:
+    return bool(re.fullmatch(r"Colonne\d+", _normalized_header(column_name), flags=re.IGNORECASE))
+
+
+def _display_template_header(column_name: str, project_id: Optional[int] = None) -> str:
+    normalized = _normalized_header(column_name)
+    roadmap_idx = {
+        "Project - Part of Project": 0,
+        "Project - Part of Project1": 0,
+        "Project - Part of Project2": 1,
+        "Project - Part of Project3": 2,
+    }.get(normalized)
+    labels = _roadmap_labels()
+    if roadmap_idx is not None and roadmap_idx < len(labels):
+        return labels[roadmap_idx]
+    return normalized
+
+
 def _add_custom_column_to_project(project_id: int, column_name: str, owner_role: str) -> Dict[str, Any]:
+    return _add_custom_column_to_project_section(project_id, column_name, owner_role, None)
+
+
+def _add_custom_column_to_project_section(project_id: int, column_name: str, owner_role: str, section: Optional[str]) -> Dict[str, Any]:
     normalized_name = str(column_name or "").strip()
     normalized_role = str(owner_role or "").strip().upper()
     allowed_roles = {"BUYER", "SQD", "CAPACITY_MANAGER", "ADMIN"}
+    role_sections = {
+        "BUYER": {"PART DATA", "WEEKLY CONTRACTED CAPACITY", "CAPACITY SIZING"},
+        "CAPACITY_MANAGER": {"CAPACITY SIZING", "CAPACITY WORKSHOP (STEP 2)"},
+        "SQD": {"PART DATA", "SUPPLIER INFORMATION", "CAPACITY WORKSHOP (STEP 2)", "CAT"},
+        "ADMIN": {"PART DATA", "WEEKLY CONTRACTED CAPACITY", "CAPACITY SIZING", "CAPACITY WORKSHOP (STEP 2)", "SUPPLIER INFORMATION", "CAT"},
+    }
     if not normalized_name:
         raise HTTPException(status_code=400, detail="Column name is required")
     if normalized_role not in allowed_roles:
         raise HTTPException(status_code=400, detail="owner_role must be BUYER, SQD, CAPACITY_MANAGER, or ADMIN")
+    normalized_section = str(section or "").strip().upper()
+    if not normalized_section:
+        normalized_section = sorted(role_sections[normalized_role])[0]
+    valid_sections = role_sections[normalized_role]
+    if normalized_section not in valid_sections:
+        raise HTTPException(status_code=400, detail=f"section must be one of: {', '.join(sorted(valid_sections))}")
 
     existing_columns = column_repo.get_columns(project_id)
     next_order = max([int(column.get("display_order") or 0) for column in existing_columns], default=-1) + 1
@@ -484,6 +698,7 @@ def _add_custom_column_to_project(project_id: int, column_name: str, owner_role:
         is_auto=0,
         display_order=next_order,
         can_edit=1,
+        custom_section=normalized_section,
     )
     if not inserted:
         raise HTTPException(status_code=400, detail="Unable to add custom column")
@@ -495,7 +710,7 @@ def _add_custom_column_to_project(project_id: int, column_name: str, owner_role:
         "owner_role": column.owner_role,
         "is_auto": column.is_auto,
         "display_order": column.display_order,
-        "section": get_column_section(column.column_name),
+        "section": normalized_section,
         "roles": column_repo.get_roles_for_column(project_id, column.column_name),
     }
 
@@ -515,10 +730,13 @@ def _apply_roadmap(flat: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, A
     enriched = dict(flat)
     part_number = str(enriched.get("PART NUMBER") or enriched.get("part_number") or "").strip()
     enriched["PART NUMBER"] = part_number
+    enriched["PART NAME"] = enriched.get("PART NAME") or enriched.get("part_name") or ""
     enriched["APQP GRID"] = enriched.get("APQP GRID") or enriched.get("apqp_grid") or enriched.get("apqp") or ""
     gor_value = _react_gor_value(enriched)
-    enriched["GOR (Green, Orange, Red) Supplier Capacity Contracted regarding Buyer"] = gor_value
-    enriched["GOR (Green, Orange, Red) Supplier Capacity Contracted regarding Buyer Capacity Requested"] = gor_value
+    cat_value = _react_cat_value(enriched)
+    enriched[GOR_COLUMN] = gor_value
+    enriched[GOR_REQUESTED_COLUMN] = gor_value
+    enriched[CAT_VALUATION_COLUMN] = cat_value
     entry = context["by_part_number"].get(part_number, {})
     projects = context["projects"]
     enriched["ROADMAP"] = ""
@@ -536,27 +754,23 @@ def _apply_roadmap(flat: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, A
 
 
 def _template_columns() -> List[str]:
-    projects = record_repo.get_all_projects_for_cross_view()
-    roadmap_labels = [_project_label(project) for project in projects[:3]]
-
-    def _display_column(column: str) -> str:
-        roadmap_idx = {
-            "Project - Part of Project": 0,
-            "Project - Part of Project2": 1,
-            "Project - Part of Project3": 2,
-        }.get(column)
-        if roadmap_idx is not None and roadmap_idx < len(roadmap_labels):
-            return roadmap_labels[roadmap_idx]
-        return column
-
     if REACT_CMF_TEMPLATE_PATH.exists():
         try:
             from openpyxl import load_workbook
 
             wb = load_workbook(REACT_CMF_TEMPLATE_PATH, read_only=True, data_only=False)
             ws = wb["CMF"] if "CMF" in wb.sheetnames else wb.active
-            columns = [_normalized_header(ws.cell(row=3, column=col_idx).value) for col_idx in range(1, ws.max_column + 1)]
-            template_columns = [_display_column(column) for column in columns if column and column not in REACT_SECTION_MARKER_COLUMNS]
+            header_row = 1 if any(_normalized_header(ws.cell(row=2, column=col_idx).value) == "xxx" for col_idx in range(1, ws.max_column + 1)) else 3
+            columns = []
+            for col_idx in range(1, ws.max_column + 1):
+                column = _normalized_header(ws.cell(row=header_row, column=col_idx).value)
+                marker = _normalized_header(ws.cell(row=header_row + 1, column=col_idx).value) if header_row == 1 else ""
+                if not column or marker.lower() == "xxx" or column in REACT_SECTION_MARKER_COLUMNS:
+                    continue
+                if _is_custom_placeholder(column):
+                    continue
+                columns.append(column)
+            template_columns = [_display_template_header(column) for column in columns]
             custom_columns = [
                 column["column_name"]
                 for project in project_repo.get_all_projects()
@@ -573,8 +787,11 @@ def _template_columns() -> List[str]:
 def _project_full_rows(project_id: int) -> List[Dict[str, Any]]:
     context = _roadmap_context()
     rows = []
-    for record in record_repo.get_records_for_project(project_id):
-        rows.append(_apply_roadmap(record.to_dict(), context))
+    for index, record in enumerate(record_repo.get_records_for_project(project_id), 1):
+        row = _apply_roadmap(record.to_dict(), context)
+        row["CMF LINE NÂ°"] = index
+        row["CMF LINE N°"] = index
+        rows.append(row)
     return rows
 
 
@@ -598,20 +815,80 @@ def _build_template_export(project_id: int) -> BytesIO:
     try:
         from copy import copy
         from openpyxl import load_workbook
+        from openpyxl.styles import Border, PatternFill, Side
+        from openpyxl.utils.cell import range_boundaries
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"openpyxl is required for CMF export: {exc}") from exc
 
     wb = load_workbook(REACT_CMF_TEMPLATE_PATH)
     ws = wb["CMF"] if "CMF" in wb.sheetnames else wb.active
-    headers = [ws.cell(row=3, column=col_idx).value for col_idx in range(1, ws.max_column + 1)]
+    for table_name in list(ws.tables.keys()):
+        del ws.tables[table_name]
+    header_row = 1 if any(_normalized_header(ws.cell(row=2, column=col_idx).value) == "xxx" for col_idx in range(1, ws.max_column + 1)) else 3
+    data_start_row = 4
+    headers = [ws.cell(row=header_row, column=col_idx).value for col_idx in range(1, ws.max_column + 1)]
     rows = _project_full_rows(project_id)
+    custom_columns = _project_custom_column_names(project_id)
+    thin_side = Side(style="thin", color="808080")
+    thin_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+    separator_fill = PatternFill(fill_type="solid", fgColor="D9D9D9")
+    clear_fill = PatternFill(fill_type=None)
+    valuation_fills = {
+        "G": PatternFill(fill_type="solid", fgColor="C6EFCE"),
+        "O": PatternFill(fill_type="solid", fgColor="FCE4D6"),
+        "R": PatternFill(fill_type="solid", fgColor="FFC7CE"),
+    }
+    no_fill_headers = {
+        "INVESTMENT impact of Capacity Step (EURO)",
+        "LEAD TIME to implement Capacity Step (WEEKS)",
+        "CAPACITY CONTRACTED STEP (Parts/Week)",
+    }
+    valuation_headers = {GOR_REQUESTED_COLUMN, GOR_COLUMN, CAT_VALUATION_COLUMN}
+    separator_columns = {
+        col_idx
+        for col_idx in range(1, ws.max_column + 1)
+        if header_row == 1 and _normalized_header(ws.cell(row=2, column=col_idx).value).lower() == "xxx"
+    }
+    no_fill_columns = {
+        col_idx
+        for col_idx, header in enumerate(headers, 1)
+        if _normalized_header(header) in no_fill_headers
+    }
+    for cf_range in list(ws.conditional_formatting):
+        should_remove = False
+        for range_part in str(cf_range.sqref).split():
+            min_col, _, max_col, _ = range_boundaries(range_part)
+            if any(min_col <= col_idx <= max_col for col_idx in no_fill_columns):
+                should_remove = True
+                break
+        if should_remove:
+            del ws.conditional_formatting[str(cf_range.sqref)]
+    custom_placeholder_columns = [
+        col_idx
+        for col_idx, header in enumerate(headers, 1)
+        if _is_custom_placeholder(str(header or ""))
+    ]
 
-    for row_idx in range(4, ws.max_row + 1):
+    if header_row == 1:
+        ws.row_dimensions[2].hidden = True
+        ws.row_dimensions[3].hidden = True
+
+    for col_idx, header in enumerate(headers, 1):
+        normalized_header = _normalized_header(header)
+        if normalized_header.startswith("Project - Part of Project"):
+            ws.cell(row=header_row, column=col_idx).value = _display_template_header(normalized_header, project_id)
+            headers[col_idx - 1] = ws.cell(row=header_row, column=col_idx).value
+
+    for idx, col_idx in enumerate(custom_placeholder_columns):
+        ws.cell(row=header_row, column=col_idx).value = custom_columns[idx] if idx < len(custom_columns) else ""
+        headers[col_idx - 1] = ws.cell(row=header_row, column=col_idx).value
+
+    for row_idx in range(data_start_row, ws.max_row + 1):
         for col_idx in range(1, ws.max_column + 1):
             ws.cell(row=row_idx, column=col_idx).value = None
 
-    style_row = 4
-    for row_offset, data_row in enumerate(rows, 4):
+    style_row = data_start_row
+    for row_offset, data_row in enumerate(rows, data_start_row):
         for col_idx, header in enumerate(headers, 1):
             cell = ws.cell(row=row_offset, column=col_idx)
             source = ws.cell(row=style_row, column=col_idx)
@@ -623,7 +900,29 @@ def _build_template_export(project_id: int) -> BytesIO:
                 cell.alignment = copy(source.alignment)
                 cell.number_format = source.number_format
                 cell.protection = copy(source.protection)
-            cell.value = _template_cell_value(data_row, header)
+            marker = _normalized_header(ws.cell(row=header_row + 1, column=col_idx).value) if header_row == 1 else ""
+            normalized_header = _normalized_header(header)
+            cell.value = "" if marker.lower() == "xxx" else _template_cell_value(data_row, header)
+            cell.border = thin_border
+            if col_idx in separator_columns:
+                cell.fill = separator_fill
+            elif normalized_header in no_fill_headers:
+                cell.fill = clear_fill
+            elif normalized_header in valuation_headers:
+                cell.fill = valuation_fills.get(str(cell.value).strip().upper(), clear_fill)
+
+    max_style_row = max(data_start_row + len(rows) - 1, data_start_row)
+    for row_idx in range(header_row, ws.max_row + 1):
+        for col_idx in range(1, ws.max_column + 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            normalized_header = _normalized_header(headers[col_idx - 1])
+            cell.border = thin_border
+            if col_idx in separator_columns:
+                cell.fill = separator_fill
+            elif row_idx >= data_start_row and normalized_header in no_fill_headers:
+                cell.fill = clear_fill
+            elif row_idx >= data_start_row and normalized_header in valuation_headers:
+                cell.fill = valuation_fills.get(str(cell.value).strip().upper(), clear_fill)
 
     output = BytesIO()
     wb.save(output)
@@ -704,6 +1003,7 @@ def _parse_import_file(payload: ImportFileParse) -> Dict[str, Any]:
 def startup() -> None:
     db_sqlite.init_db()
     _ensure_users_table()
+    _ensure_react_schema_migrations()
 
 
 @app.get("/api/health")
@@ -758,7 +1058,7 @@ def create_project(payload: ProjectCreate) -> Dict[str, Any]:
     if payload.sqd_assigned_name:
         project_repo.assign_user_to_project(payload.sqd_assigned_name, project.id, "SQD", assigned_by=payload.created_by)
     for custom_column in payload.custom_columns:
-        _add_custom_column_to_project(project.id, custom_column.column_name, custom_column.owner_role)
+        _add_custom_column_to_project_section(project.id, custom_column.column_name, custom_column.owner_role, custom_column.section)
     return {"project": _project_payload(project)}
 
 
@@ -771,7 +1071,8 @@ def project_columns(project_id: int) -> Dict[str, Any]:
         "columns": [
             {
                 **column,
-                "section": get_column_section(column["column_name"]),
+                "section": column.get("custom_section") or get_column_section(column["column_name"]),
+                "is_custom": get_column_section(column["column_name"]) == "CUSTOMIZED COLUMNS",
                 "roles": column_repo.get_roles_for_column(project_id, column["column_name"]),
             }
             for column in columns
@@ -785,7 +1086,7 @@ def add_project_custom_column(project_id: int, payload: CustomColumnPayload) -> 
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     _ensure_project_write_access(project, payload.actor_email, "CAPACITY_MANAGER")
-    return {"column": _add_custom_column_to_project(project_id, payload.column_name, payload.owner_role)}
+    return {"column": _add_custom_column_to_project_section(project_id, payload.column_name, payload.owner_role, payload.section)}
 
 
 @app.get("/api/projects/{project_id}/editable-columns")
@@ -794,8 +1095,8 @@ def editable_columns(project_id: int, role: str, section: Optional[str] = None) 
         raise HTTPException(status_code=404, detail="Project not found")
     columns = column_repo.get_columns_for_role(project_id, role)
     if section:
-        columns = [column for column in columns if get_column_section(column) == section]
-    return {"columns": [{"name": column, "section": get_column_section(column)} for column in columns]}
+        columns = [column for column in columns if _column_section_for_project(project_id, column) == section]
+    return {"columns": [{"name": column, "section": _column_section_for_project(project_id, column)} for column in columns]}
 
 
 @app.get("/api/projects/{project_id}/records")

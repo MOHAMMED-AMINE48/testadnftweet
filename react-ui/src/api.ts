@@ -52,6 +52,7 @@ export type ApiProjectColumn = {
   is_auto: number;
   display_order: number;
   section: string;
+  is_custom?: boolean;
   roles: string[];
 };
 
@@ -162,7 +163,7 @@ export async function createProject(payload: {
   sqd_assigned_name?: string;
   cmf_status?: string;
   created_by?: string;
-  custom_columns?: Array<{ column_name: string; owner_role: string }>;
+  custom_columns?: Array<{ column_name: string; owner_role: string; section?: string }>;
 }): Promise<ApiProject> {
   const response = await fetch(`${API_BASE}/projects`, {
     method: "POST",
@@ -177,7 +178,7 @@ export async function createProject(payload: {
   return data.project;
 }
 
-export async function addCustomColumn(projectId: number, payload: { column_name: string; owner_role: string; actor_email?: string }): Promise<ApiProjectColumn> {
+export async function addCustomColumn(projectId: number, payload: { column_name: string; owner_role: string; section?: string; actor_email?: string }): Promise<ApiProjectColumn> {
   const response = await fetch(`${API_BASE}/projects/${projectId}/custom-columns`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

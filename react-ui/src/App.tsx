@@ -139,17 +139,28 @@ type UIRecord = {
   requested: number;
   measured: number;
   catType: string;
-  cat: Health;
-  gor: Health;
+  cat: Health | "";
+  gor: Health | "";
   owner: string;
 };
 
 type CustomColumnDraft = {
   name: string;
   ownerRole: string;
+  section: string;
 };
 
 const customColumnRoles = ["BUYER", "SQD", "CAPACITY_MANAGER", "ADMIN"];
+const customColumnSectionsByRole: Record<string, string[]> = {
+  BUYER: ["PART DATA", "WEEKLY CONTRACTED CAPACITY", "CAPACITY SIZING"],
+  CAPACITY_MANAGER: ["CAPACITY SIZING", "CAPACITY WORKSHOP (STEP 2)"],
+  SQD: ["PART DATA", "SUPPLIER INFORMATION", "CAPACITY WORKSHOP (STEP 2)", "CAT"],
+  ADMIN: ["PART DATA", "WEEKLY CONTRACTED CAPACITY", "CAPACITY SIZING", "CAPACITY WORKSHOP (STEP 2)", "SUPPLIER INFORMATION", "CAT"],
+};
+
+function defaultCustomSection(role: string): string {
+  return customColumnSectionsByRole[role]?.[0] ?? "PART DATA";
+}
 
 function apiRoleToAppRole(role: string): AppRole {
   const normalized = role.trim().toUpperCase();
@@ -180,6 +191,11 @@ function health(value: unknown): Health {
   return normalized === "R" || normalized === "O" || normalized === "G" ? normalized : "O";
 }
 
+function healthOrBlank(value: unknown): Health | "" {
+  const normalized = text(value).trim().toUpperCase();
+  return normalized === "R" || normalized === "O" || normalized === "G" ? normalized : "";
+}
+
 function normalizeColumnName(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
@@ -205,10 +221,27 @@ async function fileToBase64(file: File): Promise<string> {
   return btoa(binary);
 }
 
-function partRisk(record: UIRecord): Health {
+function partRisk(record: UIRecord): Health | "" {
   if (record.cat === "R" || record.gor === "R") return "R";
   if (record.cat === "O" || record.gor === "O") return "O";
-  return "G";
+  if (record.cat === "G" && record.gor === "G") return "G";
+  return "";
+}
+
+function riskRank(record: UIRecord): number {
+  const risk = partRisk(record);
+  if (risk === "R") return 0;
+  if (risk === "O") return 1;
+  if (risk === "G") return 2;
+  return 3;
+}
+
+function hasCapacityForGor(flat: Record<string, unknown>): boolean {
+  return number(flat["WEEKLY CAPACITY CONTRACTED (Parts/Week)"]) > 0 && number(flat["LAST WEEKLY CAPACITY REQUESTED"]) > 0;
+}
+
+function hasCapacityForCat(flat: Record<string, unknown>): boolean {
+  return hasCapacityForGor(flat) && number(flat["WEEKLY CAPACITY MEASURED"]) > 0;
 }
 
 function isAssignedToUser(user: ApiUser, assignedName?: string | null): boolean {
@@ -278,8 +311,8 @@ function mapApiRecord(record: ApiRecord): UIRecord {
     requested: number(flat["LAST WEEKLY CAPACITY REQUESTED"]),
     measured: number(flat["WEEKLY CAPACITY MEASURED"]),
     catType: text(flat["CAT1/2/3 TYPE"], "N/A"),
-    cat: health(flat["CAT1/2/3 VALUATION (G;O;R)"]),
-    gor: health(flat["GOR (Green, Orange, Red) Supplier Capacity Contracted regarding Buyer"]),
+    cat: hasCapacityForCat(flat) ? healthOrBlank(flat["CAT1/2/3 VALUATION (G;O;R)"]) : "",
+    gor: hasCapacityForGor(flat) ? healthOrBlank(flat["GOR (Green, Orange, Red) Supplier Capacity Contracted regarding Buyer"]) : "",
     owner: text(flat.updated_by, "CMF"),
   };
 }
@@ -634,7 +667,7 @@ function Projects({
   const [notice, setNotice] = useState("");
   const [createCustomColumns, setCreateCustomColumns] = useState<CustomColumnDraft[]>([]);
   const [manageCustomColumns, setManageCustomColumns] = useState<ApiProjectColumn[]>([]);
-  const [newManageCustomColumn, setNewManageCustomColumn] = useState<CustomColumnDraft>({ name: "", ownerRole: "BUYER" });
+  const [newManageCustomColumn, setNewManageCustomColumn] = useState<CustomColumnDraft>({ name: "", ownerRole: "BUYER", section: defaultCustomSection("BUYER") });
   const manageProject = projects.find((item) => item.id === selectedManageProject) ?? projects[0];
   const [manageForm, setManageForm] = useState({
     partOfProject: manageProject?.partOfProject ?? "",
@@ -661,7 +694,7 @@ function Projects({
   useEffect(() => {
     if (!manageProject?.apiId || mode !== "manage") return;
     fetchProjectColumns(manageProject.apiId)
-      .then((columns) => setManageCustomColumns(columns.filter((column) => column.section === "CUSTOMIZED COLUMNS")))
+      .then((columns) => setManageCustomColumns(columns.filter((column) => column.is_custom)))
       .catch(() => setManageCustomColumns([]));
   }, [manageProject?.apiId, mode]);
 
@@ -670,7 +703,7 @@ function Projects({
   }
 
   function addCreateCustomColumn() {
-    setCreateCustomColumns((current) => [...current, { name: "", ownerRole: "BUYER" }]);
+    setCreateCustomColumns((current) => [...current, { name: "", ownerRole: "BUYER", section: defaultCustomSection("BUYER") }]);
   }
 
   function updateCreateCustomColumn(index: number, patch: Partial<CustomColumnDraft>) {
@@ -693,10 +726,11 @@ function Projects({
       const column = await addCustomColumn(manageProject.apiId, {
         column_name: newManageCustomColumn.name,
         owner_role: newManageCustomColumn.ownerRole,
+        section: newManageCustomColumn.section,
         actor_email: user.email,
       });
       setManageCustomColumns((current) => [...current.filter((item) => item.column_name !== column.column_name), column]);
-      setNewManageCustomColumn({ name: "", ownerRole: "BUYER" });
+      setNewManageCustomColumn({ name: "", ownerRole: "BUYER", section: defaultCustomSection("BUYER") });
       setNotice("Custom column added.");
     } catch (event) {
       setError(event instanceof Error ? event.message : "Unable to add custom column");
@@ -769,7 +803,7 @@ function Projects({
         created_by: form.capacityManager,
         custom_columns: createCustomColumns
           .filter((column) => column.name.trim())
-          .map((column) => ({ column_name: column.name.trim(), owner_role: column.ownerRole })),
+          .map((column) => ({ column_name: column.name.trim(), owner_role: column.ownerRole, section: column.section })),
       });
       const imported = await importCompletedRows(created.id);
       onProjectCreated({ ...mapApiProject(created), records: completedImport ? imported.ok : mapApiProject(created).records });
@@ -857,15 +891,28 @@ function Projects({
                 <Field label="Column Name" placeholder="Custom CMF column" value={newManageCustomColumn.name} onChange={(value) => setNewManageCustomColumn((current) => ({ ...current, name: value }))} disabled={!canManageSelected} />
                 <label className="field">
                   <span>Assigned user role</span>
-                  <select value={newManageCustomColumn.ownerRole} disabled={!canManageSelected} onChange={(event) => setNewManageCustomColumn((current) => ({ ...current, ownerRole: event.target.value }))}>
+                  <select
+                    value={newManageCustomColumn.ownerRole}
+                    disabled={!canManageSelected}
+                    onChange={(event) => {
+                      const ownerRole = event.target.value;
+                      setNewManageCustomColumn((current) => ({ ...current, ownerRole, section: defaultCustomSection(ownerRole) }));
+                    }}
+                  >
                     {customColumnRoles.map((roleOption) => <option key={roleOption} value={roleOption}>{roleOption}</option>)}
+                  </select>
+                </label>
+                <label className="field">
+                  <span>Partie Section</span>
+                  <select value={newManageCustomColumn.section} disabled={!canManageSelected} onChange={(event) => setNewManageCustomColumn((current) => ({ ...current, section: event.target.value }))}>
+                    {(customColumnSectionsByRole[newManageCustomColumn.ownerRole] ?? []).map((sectionOption) => <option key={sectionOption} value={sectionOption}>{sectionOption}</option>)}
                   </select>
                 </label>
                 <button className="primary-button full" onClick={addManagedCustomColumn} disabled={!canManageSelected}>Add column</button>
               </div>
               <div className="custom-column-list">
                 {manageCustomColumns.map((column) => (
-                  <span key={column.column_name}>{column.column_name} {">"} {(column.roles?.[0] ?? column.owner_role)}</span>
+                  <span key={column.column_name}>{column.column_name} {">"} {(column.roles?.[0] ?? column.owner_role)} {">"} {column.section}</span>
                 ))}
               </div>
             </div>
@@ -896,11 +943,20 @@ function Projects({
             <PanelHeader title="Customized Columns" action="Optional" />
             <div className="custom-column-list">
               {createCustomColumns.map((column, index) => (
-                <div className="mapping-row" key={index}>
+                <div className="mapping-row custom-column-row" key={index}>
                   <input value={column.name} onChange={(event) => updateCreateCustomColumn(index, { name: event.target.value })} placeholder="Custom column name" />
                   <ChevronDown size={16} />
-                  <select value={column.ownerRole} onChange={(event) => updateCreateCustomColumn(index, { ownerRole: event.target.value })}>
+                  <select
+                    value={column.ownerRole}
+                    onChange={(event) => {
+                      const ownerRole = event.target.value;
+                      updateCreateCustomColumn(index, { ownerRole, section: defaultCustomSection(ownerRole) });
+                    }}
+                  >
                     {customColumnRoles.map((roleOption) => <option key={roleOption} value={roleOption}>{roleOption}</option>)}
+                  </select>
+                  <select value={column.section} onChange={(event) => updateCreateCustomColumn(index, { section: event.target.value })}>
+                    {(customColumnSectionsByRole[column.ownerRole] ?? []).map((sectionOption) => <option key={sectionOption} value={sectionOption}>{sectionOption}</option>)}
                   </select>
                   <button className="ghost-button" onClick={() => removeCreateCustomColumn(index)}>Remove</button>
                 </div>
@@ -1150,7 +1206,7 @@ function DataGrid({ compact = false, records, title = "All CMF Data" }: { compac
       return !columnFilter || String(column.value(record) ?? "").toLowerCase().includes(columnFilter);
     });
     return globalMatch && columnMatch;
-  });
+  }).sort((left, right) => riskRank(left) - riskRank(right) || left.part.localeCompare(right.part));
 
   function exportCsv() {
     const headers = ["Part Number", "APQP", "Supplier", "Use case", "Contracted", "Requested", "Measured", "CAT", "GOR"];
@@ -2118,7 +2174,8 @@ function TimelineItem({ title, detail }: { title: string; detail: string }) {
   );
 }
 
-function HealthPill({ value }: { value: Health }) {
+function HealthPill({ value }: { value: Health | "" }) {
+  if (!value) return <span className="empty-cell"></span>;
   return <span className={`health ${healthMeta[value].className}`}>{value}</span>;
 }
 

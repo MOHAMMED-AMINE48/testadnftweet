@@ -76,6 +76,20 @@ export type ApiAuditLog = {
   project_id: number | null;
 };
 
+export type ApiActionPlan = {
+  id: number;
+  project_id: number;
+  record_id: number;
+  part_number: string;
+  problem_type: string;
+  target_column: string;
+  action_text: string;
+  old_value: string | null;
+  new_value: string | null;
+  created_by: string;
+  created_at: string;
+};
+
 export async function loginUser(payload: { email: string; password: string }): Promise<ApiUser> {
   const response = await fetch(`${API_BASE}/auth/login`, {
     method: "POST",
@@ -120,6 +134,61 @@ export async function fetchProjectColumns(projectId: number): Promise<ApiProject
 
 export async function fetchProjectFullData(projectId: number): Promise<ApiFullData> {
   return getJson<ApiFullData>(`/projects/${projectId}/full-data`);
+}
+
+export async function updateProjectRecord(projectId: number, recordId: number, payload: {
+  part_number?: string;
+  apqp_grid?: string;
+  values: Record<string, unknown>;
+  updated_by?: string;
+  actor_email?: string;
+}): Promise<ApiRecord> {
+  const response = await fetch(`${API_BASE}/projects/${projectId}/records/${recordId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail ?? `${response.status} ${response.statusText}`);
+  }
+  const data = (await response.json()) as { record: ApiRecord };
+  return data.record;
+}
+
+export async function deleteProjectRecord(projectId: number, recordId: number, actorEmail: string, updatedBy: string): Promise<void> {
+  const params = new URLSearchParams({ actor_email: actorEmail, updated_by: updatedBy });
+  const response = await fetch(`${API_BASE}/projects/${projectId}/records/${recordId}?${params.toString()}`, { method: "DELETE" });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail ?? `${response.status} ${response.statusText}`);
+  }
+}
+
+export async function fetchActionPlans(projectId: number): Promise<ApiActionPlan[]> {
+  const data = await getJson<{ action_plans: ApiActionPlan[] }>(`/projects/${projectId}/action-plans`);
+  return data.action_plans;
+}
+
+export async function createActionPlan(projectId: number, payload: {
+  record_id: number;
+  problem_type: string;
+  action_text: string;
+  old_value?: string;
+  new_value: string;
+  created_by?: string;
+  actor_email?: string;
+}): Promise<{ action_plan: ApiActionPlan; record: ApiRecord }> {
+  const response = await fetch(`${API_BASE}/projects/${projectId}/action-plans`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail ?? `${response.status} ${response.statusText}`);
+  }
+  return response.json() as Promise<{ action_plan: ApiActionPlan; record: ApiRecord }>;
 }
 
 export async function fetchCrossProject(): Promise<ApiCrossProject> {

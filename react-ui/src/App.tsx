@@ -23,11 +23,14 @@ import {
   adminResetProjectRecords,
   adminUpdateRecord,
   adminUpsertRecord,
+  createActionPlan,
   createProject,
   createUser,
+  deleteProjectRecord,
   deleteProject,
   deleteUser,
   downloadProjectCmfExport,
+  fetchActionPlans,
   fetchEditableColumns,
   fetchCrossProject,
   fetchProjectFullData,
@@ -42,6 +45,7 @@ import {
   parseImportFile,
   saveRoleRecord,
   upsertRecord,
+  updateProjectRecord,
   updateProject,
   updateUserRole,
   updateUserPassword,
@@ -50,6 +54,7 @@ import {
   type ApiCrossProject,
   type ApiProjectColumn,
   type ApiAuditLog,
+  type ApiActionPlan,
   type ApiUser,
   type ParsedImportFile,
 } from "./api";
@@ -58,7 +63,6 @@ import { cmfColumns, fileColumns, projects, records, sections, type Health } fro
 type AppRole = "Buyer" | "Capacity Manager" | "SQD" | "Admin";
 type ViewId =
   | "command"
-  | "view-data"
   | "buyer-part-data"
   | "weekly-capacity"
   | "cross-project"
@@ -74,15 +78,13 @@ type ViewId =
 
 const roleNavigation: Record<AppRole, Array<{ id: ViewId; label: string; icon: typeof LayoutDashboard }>> = {
   Buyer: [
-    { id: "command", label: "Command Center", icon: LayoutDashboard },
-    { id: "view-data", label: "View All Data", icon: Database },
+    { id: "command", label: "Global Overview", icon: LayoutDashboard },
     { id: "buyer-part-data", label: "Part Data", icon: PackagePlus },
     { id: "weekly-capacity", label: "Weekly Contracted Capacity", icon: Gauge },
     { id: "cross-project", label: "VEHICULES ROAD MAP", icon: ArrowRight },
   ],
   "Capacity Manager": [
-    { id: "command", label: "Command Center", icon: LayoutDashboard },
-    { id: "view-data", label: "View All Data", icon: Database },
+    { id: "command", label: "Global Overview", icon: LayoutDashboard },
     { id: "manage-projects", label: "Manage Projects", icon: Settings },
     { id: "create-project", label: "Create Project", icon: Plus },
     { id: "capacity-sizing", label: "CAPACITY SIZING", icon: Gauge },
@@ -90,8 +92,7 @@ const roleNavigation: Record<AppRole, Array<{ id: ViewId; label: string; icon: t
     { id: "cross-project", label: "VEHICULES ROAD MAP", icon: ArrowRight },
   ],
   SQD: [
-    { id: "command", label: "Command Center", icon: LayoutDashboard },
-    { id: "view-data", label: "View All Data", icon: Database },
+    { id: "command", label: "Global Overview", icon: LayoutDashboard },
     { id: "sqd-part-data", label: "PART DATA", icon: PackagePlus },
     { id: "supplier-information", label: "SUPPLIER INFORMATION", icon: Users },
     { id: "capacity-workshop", label: "CAPACITY WORKSHOP (STEP 2)", icon: FileUp },
@@ -99,8 +100,7 @@ const roleNavigation: Record<AppRole, Array<{ id: ViewId; label: string; icon: t
     { id: "cross-project", label: "VEHICULES ROAD MAP", icon: ArrowRight },
   ],
   Admin: [
-    { id: "command", label: "Command Center", icon: LayoutDashboard },
-    { id: "view-data", label: "View All Data", icon: Database },
+    { id: "command", label: "Global Overview", icon: LayoutDashboard },
     { id: "manage-projects", label: "Manage Projects", icon: Settings },
     { id: "create-project", label: "Create Project", icon: Plus },
     { id: "buyer-part-data", label: "Buyer Page", icon: PackagePlus },
@@ -424,7 +424,16 @@ function App() {
           selectedProject={selectedProject}
           setSelectedProject={setSelectedProject}
         />
-        {activeView === "command" && <Dashboard project={project} records={recordList} role={role} />}
+        {activeView === "command" && (
+          <Dashboard
+            project={project}
+            records={recordList}
+            role={role}
+            user={currentUser}
+            canEdit={Boolean(currentCanEdit)}
+            onRecordsChanged={setRecordList}
+          />
+        )}
         {activeView === "manage-projects" && (
           <Projects
             projects={projectList}
@@ -458,7 +467,6 @@ function App() {
             }}
           />
         )}
-        {activeView === "view-data" && <FullCmfGrid project={project} fallbackRecords={recordList} />}
         {activeView === "buyer-part-data" && <BuyerWorkspace project={project} records={recordList} onSaved={setRecordList} section="PART DATA" canEdit={currentCanEdit} user={currentUser} />}
         {activeView === "weekly-capacity" && <BuyerWorkspace project={project} records={recordList} onSaved={setRecordList} section="WEEKLY CONTRACTED CAPACITY" canEdit={currentCanEdit} user={currentUser} />}
         {activeView === "cross-project" && <CrossProjectView projects={projectList} />}
@@ -581,7 +589,21 @@ function LoginScreen({ onLogin }: { onLogin: (user: ApiUser) => void }) {
   );
 }
 
-function Dashboard({ project, records, role }: { project: UIProject; records: UIRecord[]; role: AppRole }) {
+function Dashboard({
+  project,
+  records,
+  role,
+  user,
+  canEdit,
+  onRecordsChanged,
+}: {
+  project: UIProject;
+  records: UIRecord[];
+  role: AppRole;
+  user: ApiUser;
+  canEdit: boolean;
+  onRecordsChanged: (records: UIRecord[]) => void;
+}) {
   const redParts = records.filter((record) => partRisk(record) === "R").length;
   const orangeParts = records.filter((record) => partRisk(record) === "O").length;
   const greenParts = records.filter((record) => partRisk(record) === "G").length;
@@ -596,9 +618,9 @@ function Dashboard({ project, records, role }: { project: UIProject; records: UI
     <section className="page-grid">
       <div className="page-title">
         <div>
-          <span className="eyebrow">{role} Command Center</span>
-          <h1>{project.project}</h1>
-          <p>{project.partOfProject} workspace with role-specific actions, assignments, and CMF readiness.</p>
+          <span className="eyebrow">{role} Global Overview</span>
+          <h1>Global Overview</h1>
+          <p>{project.project} / {project.partOfProject} workspace with CMF readiness and the complete project data table.</p>
         </div>
       </div>
 
@@ -630,7 +652,16 @@ function Dashboard({ project, records, role }: { project: UIProject; records: UI
         </div>
       </div>
 
-      <DataGrid compact records={records} />
+      <FullCmfGrid
+        project={project}
+        fallbackRecords={records}
+        title="Project CMF Data"
+        embedded
+        canEdit={canEdit}
+        role={role}
+        user={user}
+        onRecordsChanged={onRecordsChanged}
+      />
     </section>
   );
 }
@@ -1024,7 +1055,25 @@ function Projects({
   );
 }
 
-function FullCmfGrid({ project, fallbackRecords }: { project: UIProject; fallbackRecords: UIRecord[] }) {
+function FullCmfGrid({
+  project,
+  fallbackRecords,
+  title = "Project CMF Data",
+  embedded = false,
+  canEdit = false,
+  role = "Buyer",
+  user,
+  onRecordsChanged,
+}: {
+  project: UIProject;
+  fallbackRecords: UIRecord[];
+  title?: string;
+  embedded?: boolean;
+  canEdit?: boolean;
+  role?: AppRole;
+  user?: ApiUser;
+  onRecordsChanged?: (records: UIRecord[]) => void;
+}) {
   const [filter, setFilter] = useState("");
   const [columns, setColumns] = useState<string[]>([]);
   const [defaultVisible, setDefaultVisible] = useState<string[]>([]);
@@ -1032,6 +1081,17 @@ function FullCmfGrid({ project, fallbackRecords }: { project: UIProject; fallbac
   const [rows, setRows] = useState<Array<Record<string, unknown>>>([]);
   const [message, setMessage] = useState("");
   const [columnFilters, setColumnFilters] = useState<Record<string, string>>({});
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedRecordIds, setSelectedRecordIds] = useState<number[]>([]);
+  const [editDraft, setEditDraft] = useState<Record<string, string> | null>(null);
+  const [showActionPlan, setShowActionPlan] = useState(false);
+  const [actionProblem, setActionProblem] = useState("CAT Requested vs Measured");
+  const [actionText, setActionText] = useState("");
+  const [actionOldValue, setActionOldValue] = useState("");
+  const [actionNewValue, setActionNewValue] = useState("");
+  const [showPlans, setShowPlans] = useState(false);
+  const [actionPlans, setActionPlans] = useState<ApiActionPlan[]>([]);
+  const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => {
     if (!project?.apiId) {
@@ -1048,6 +1108,7 @@ function FullCmfGrid({ project, fallbackRecords }: { project: UIProject; fallbac
       setDefaultVisible(fallbackColumns);
       setVisibleColumns(fallbackColumns);
       setRows(fallbackRecords.map((record) => ({
+        "__record_id": record.id,
         "APQP GRID": record.apqp,
         "USE CASES": record.useCase,
         "PART NUMBER": record.part,
@@ -1070,7 +1131,14 @@ function FullCmfGrid({ project, fallbackRecords }: { project: UIProject; fallbac
       .catch((event) => {
         setMessage(event instanceof Error ? event.message : "Unable to load CMF data");
       });
-  }, [project?.apiId, fallbackRecords]);
+  }, [project?.apiId, fallbackRecords, reloadToken]);
+
+  useEffect(() => {
+    setSelectedRecordIds([]);
+    setEditDraft(null);
+    setShowActionPlan(false);
+    setShowPlans(false);
+  }, [project?.apiId]);
 
   const visibleRows = rows.filter((row) => {
     const globalMatch = Object.values(row).join(" ").toLowerCase().includes(filter.toLowerCase());
@@ -1085,6 +1153,26 @@ function FullCmfGrid({ project, fallbackRecords }: { project: UIProject; fallbac
     "GOR (Green, Orange, Red) Supplier Capacity Contracted regarding Buyer",
     "CAT1/2/3 VALUATION (G;O;R)",
   ];
+  const editableGridColumns = visibleColumns.filter((column) => ![
+    "CMF LINE NÂ°",
+    "CMF LINE NÃ‚Â°",
+    "ROADMAP",
+    "CarryOver - Adapted",
+    "GOR (Green, Orange, Red) Supplier Capacity Contracted regarding Buyer Capacity Requested",
+    "GOR (Green, Orange, Red) Supplier Capacity Contracted regarding Buyer",
+    "CAT1/2/3 VALUATION (G;O;R)",
+    "WEEKLY CAPACITY TO MEASURE",
+  ].includes(column));
+  const selectedRows = rows.filter((row) => selectedRecordIds.includes(rowRecordId(row)));
+  const selectedRow = selectedRows[0];
+  const canUseSelectionActions = canEdit && Boolean(project.apiId) && Boolean(user);
+  const selectedIsCritical = selectedRow ? ["r", "o"].some((value) => (
+    String(selectedRow["CAT1/2/3 VALUATION (G;O;R)"] ?? "").trim().toLowerCase() === value
+    || String(selectedRow["GOR (Green, Orange, Red) Supplier Capacity Contracted regarding Buyer"] ?? "").trim().toLowerCase() === value
+    || String(selectedRow["GOR (Green, Orange, Red) Supplier Capacity Contracted regarding Buyer Capacity Requested"] ?? "").trim().toLowerCase() === value
+  )) : false;
+  const actionTargetColumn = actionProblem === "CAT Requested vs Measured" ? "WEEKLY CAPACITY MEASURED" : "WEEKLY CAPACITY CONTRACTED (Parts/Week)";
+  const actionCurrentOldValue = actionOldValue || String(selectedRow?.[actionTargetColumn] ?? "");
 
   function toggleColumn(column: string) {
     setVisibleColumns((current) => (
@@ -1111,12 +1199,127 @@ function FullCmfGrid({ project, fallbackRecords }: { project: UIProject; fallbac
     }
   }
 
+  function rowRecordId(row: Record<string, unknown>) {
+    return Number(row.__record_id ?? 0);
+  }
+
+  function toggleSelectedRow(recordId: number) {
+    setSelectedRecordIds((current) => (
+      current.includes(recordId)
+        ? current.filter((item) => item !== recordId)
+        : [...current, recordId]
+    ));
+  }
+
+  async function refreshProjectRows() {
+    setReloadToken((current) => current + 1);
+    if (project.apiId && onRecordsChanged) {
+      const apiRecords = await fetchRecords(project.apiId);
+      onRecordsChanged(apiRecords.map(mapApiRecord));
+    }
+  }
+
+  function startEditSelected() {
+    if (selectedRows.length !== 1) return;
+    const row = selectedRows[0];
+    setEditDraft(Object.fromEntries(editableGridColumns.map((column) => [column, String(row[column] ?? "")])));
+    setShowActionPlan(false);
+  }
+
+  async function saveEditSelected() {
+    if (!project.apiId || !user || !editDraft || selectedRows.length !== 1) return;
+    const recordId = rowRecordId(selectedRows[0]);
+    const values: Record<string, unknown> = {};
+    for (const column of editableGridColumns) {
+      if (column !== "PART NUMBER" && column !== "APQP GRID") {
+        values[column] = editDraft[column] ?? "";
+      }
+    }
+    setMessage("Saving selected row...");
+    try {
+      await updateProjectRecord(project.apiId, recordId, {
+        part_number: editDraft["PART NUMBER"],
+        apqp_grid: editDraft["APQP GRID"],
+        values,
+        updated_by: user.email,
+        actor_email: user.email,
+      });
+      setEditDraft(null);
+      setSelectedRecordIds([]);
+      await refreshProjectRows();
+      setMessage("Row updated and audit log saved.");
+    } catch (event) {
+      setMessage(event instanceof Error ? event.message : "Unable to update row");
+    }
+  }
+
+  async function deleteSelectedRows() {
+    if (!project.apiId || !user || selectedRecordIds.length === 0) return;
+    const confirmed = window.confirm(`Delete ${selectedRecordIds.length} selected row(s)?`);
+    if (!confirmed) return;
+    setMessage("Deleting selected rows...");
+    try {
+      for (const recordId of selectedRecordIds) {
+        await deleteProjectRecord(project.apiId, recordId, user.email, user.email);
+      }
+      setSelectedRecordIds([]);
+      await refreshProjectRows();
+      setMessage("Selected rows deleted and audit log saved.");
+    } catch (event) {
+      setMessage(event instanceof Error ? event.message : "Unable to delete selected rows");
+    }
+  }
+
+  function startActionPlan() {
+    if (!selectedRow) return;
+    setActionProblem("CAT Requested vs Measured");
+    setActionOldValue(String(selectedRow["WEEKLY CAPACITY MEASURED"] ?? ""));
+    setActionNewValue("");
+    setActionText("");
+    setShowActionPlan(true);
+    setEditDraft(null);
+  }
+
+  async function submitActionPlan() {
+    if (!project.apiId || !user || !selectedRow) return;
+    setMessage("Saving action plan...");
+    try {
+      await createActionPlan(project.apiId, {
+        record_id: rowRecordId(selectedRow),
+        problem_type: actionProblem,
+        action_text: actionText,
+        old_value: actionCurrentOldValue,
+        new_value: actionNewValue,
+        created_by: user.email,
+        actor_email: user.email,
+      });
+      setShowActionPlan(false);
+      setSelectedRecordIds([]);
+      await refreshProjectRows();
+      if (showPlans) {
+        setActionPlans(await fetchActionPlans(project.apiId));
+      }
+      setMessage("Action plan saved, CMF value updated, and audit log saved.");
+    } catch (event) {
+      setMessage(event instanceof Error ? event.message : "Unable to save action plan");
+    }
+  }
+
+  async function toggleActionPlans() {
+    if (!project.apiId) return;
+    const next = !showPlans;
+    setShowPlans(next);
+    if (next) {
+      setActionPlans(await fetchActionPlans(project.apiId));
+    }
+  }
+
   return (
-    <section className="panel page-grid">
+    <section className={`panel page-grid ${embedded ? "global-overview-table" : ""}`}>
       <div className="page-title inside">
         <div>
           <span className="eyebrow">Unified CMF table</span>
-          <h1>View All Data</h1>
+          <h1>{title}</h1>
           <p>Initial view follows the requested CMF columns; the remaining columns stay available in the column picker.</p>
         </div>
         <div className="button-row">
@@ -1127,13 +1330,42 @@ function FullCmfGrid({ project, fallbackRecords }: { project: UIProject; fallbac
           <button className="secondary-button" onClick={() => setVisibleColumns(defaultVisible)}>
             Reset columns
           </button>
+          <button className="secondary-button" onClick={() => {
+            setSelectionMode((current) => !current);
+            setSelectedRecordIds([]);
+            setEditDraft(null);
+            setShowActionPlan(false);
+          }}>
+            Select
+          </button>
+          {selectionMode && canUseSelectionActions && (
+            <>
+              <button className="secondary-button" disabled={selectedRecordIds.length !== 1} onClick={startEditSelected}>
+                Edit
+              </button>
+              <button className="secondary-button danger-button" disabled={selectedRecordIds.length === 0} onClick={deleteSelectedRows}>
+                Delete
+              </button>
+              {role === "SQD" && (
+                <button className="secondary-button" disabled={selectedRecordIds.length !== 1 || !selectedIsCritical} onClick={startActionPlan}>
+                  Action plan
+                </button>
+              )}
+            </>
+          )}
           <button className="secondary-button" onClick={exportExactCmf}>
             <Download size={18} />
             Export CMF
           </button>
+          <button className="secondary-button" onClick={toggleActionPlans}>
+            View Action Plans
+          </button>
         </div>
       </div>
 
+      {selectionMode && !canUseSelectionActions && (
+        <div className="form-error">Selection actions are read-only because you are not assigned to this project.</div>
+      )}
       <div className="column-picker">
         {columns.map((column) => (
           <label key={column} className={visibleColumns.includes(column) ? "selected" : ""}>
@@ -1144,10 +1376,96 @@ function FullCmfGrid({ project, fallbackRecords }: { project: UIProject; fallbac
       </div>
 
       {message && <div className={message.includes("Unable") ? "form-error" : "form-success"}>{message}</div>}
+      {editDraft && (
+        <div className="action-panel">
+          <PanelHeader title="Edit Selected Row" action="Audit tracked" />
+          <div className="form-grid three">
+            {editableGridColumns.map((column) => (
+              <label className="field" key={column}>
+                <span>{column}</span>
+                <input value={editDraft[column] ?? ""} onChange={(event) => setEditDraft((current) => ({ ...(current ?? {}), [column]: event.target.value }))} />
+              </label>
+            ))}
+          </div>
+          <div className="button-row">
+            <button className="primary-button" onClick={saveEditSelected}>Save changes</button>
+            <button className="secondary-button" onClick={() => setEditDraft(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
+      {showActionPlan && selectedRow && (
+        <div className="action-panel">
+          <PanelHeader title="SQD Action Plan" action={String(selectedRow["PART NUMBER"] ?? "")} />
+          <div className="form-grid">
+            <label className="field">
+              <span>Problem</span>
+              <select value={actionProblem} onChange={(event) => {
+                const next = event.target.value;
+                setActionProblem(next);
+                const nextColumn = next === "CAT Requested vs Measured" ? "WEEKLY CAPACITY MEASURED" : "WEEKLY CAPACITY CONTRACTED (Parts/Week)";
+                setActionOldValue(String(selectedRow[nextColumn] ?? ""));
+              }}>
+                <option>CAT Requested vs Measured</option>
+                <option>GOR Requested vs Contracted</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>Old value</span>
+              <input value={actionCurrentOldValue} onChange={(event) => setActionOldValue(event.target.value)} />
+            </label>
+            <label className="field">
+              <span>New value</span>
+              <input value={actionNewValue} onChange={(event) => setActionNewValue(event.target.value)} />
+            </label>
+            <label className="field wide-field">
+              <span>Action done</span>
+              <textarea value={actionText} onChange={(event) => setActionText(event.target.value)} rows={4} />
+            </label>
+          </div>
+          <div className="button-row">
+            <button className="primary-button" disabled={!actionText.trim() || !actionNewValue.trim()} onClick={submitActionPlan}>Save action plan</button>
+            <button className="secondary-button" onClick={() => setShowActionPlan(false)}>Cancel</button>
+          </div>
+        </div>
+      )}
+      {showPlans && (
+        <div className="action-panel">
+          <PanelHeader title="Action Plans" action={`${actionPlans.length} plans`} />
+          <div className="table-wrap action-plan-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Part Number</th>
+                  <th>Problem</th>
+                  <th>Action</th>
+                  <th>Old</th>
+                  <th>New</th>
+                  <th>By</th>
+                  <th>Date</th>
+                </tr>
+              </thead>
+              <tbody>
+                {actionPlans.map((plan) => (
+                  <tr key={plan.id}>
+                    <td>{plan.part_number}</td>
+                    <td>{plan.problem_type}</td>
+                    <td>{plan.action_text}</td>
+                    <td>{plan.old_value ?? ""}</td>
+                    <td>{plan.new_value ?? ""}</td>
+                    <td>{plan.created_by}</td>
+                    <td>{plan.created_at}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
       <div className="table-wrap excel-wrap">
         <table className="excel-table">
           <thead>
             <tr>
+              {selectionMode && <th className="select-col">Select</th>}
               {visibleColumns.map((column) => (
                 <th key={column}>
                   <div className="excel-head">
@@ -1165,6 +1483,16 @@ function FullCmfGrid({ project, fallbackRecords }: { project: UIProject; fallbac
           <tbody>
             {visibleRows.map((row, index) => (
               <tr key={index}>
+                {selectionMode && (
+                  <td className="select-col">
+                    <input
+                      type="checkbox"
+                      checked={selectedRecordIds.includes(rowRecordId(row))}
+                      disabled={!rowRecordId(row)}
+                      onChange={() => toggleSelectedRow(rowRecordId(row))}
+                    />
+                  </td>
+                )}
                 {visibleColumns.map((column) => (
                   <td
                     key={column}
@@ -1254,7 +1582,7 @@ function DataGrid({ compact = false, records, title = "All CMF Data" }: { compac
           </div>
         </div>
       )}
-      {compact && <PanelHeader title="Priority Records" action="Copy / filter cells" />}
+      {compact && <PanelHeader title="Project CMF Data" action="Copy / filter cells" />}
       <div className="table-wrap excel-wrap">
         <table className="excel-table">
           <thead>
@@ -1384,10 +1712,35 @@ function SqdWorkspace({
 function CatWorkspace({ project, records, canEdit, user, onSaved }: { project: UIProject; records: UIRecord[]; canEdit: boolean; user: ApiUser; onSaved: (records: UIRecord[]) => void }) {
   const [planningPart, setPlanningPart] = useState("");
   const [resultPart, setResultPart] = useState("");
+  const [customPart, setCustomPart] = useState("");
   const [planningValues, setPlanningValues] = useState<Record<string, string>>({});
   const [resultValues, setResultValues] = useState<Record<string, string>>({ catNumber: "1" });
+  const [customCatFields, setCustomCatFields] = useState<string[]>([]);
+  const [customCatValues, setCustomCatValues] = useState<Record<string, string>>({});
   const [message, setMessage] = useState("");
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const fixedCatFields = new Set([
+    "CAT1 FORECASTED DATE (YYCWxx)",
+    "CAT2 FORECASTED DATE (YYCWxx)",
+    "CAT3 FORECASTED DATE (YYCWxx)",
+    "CAT1 REALISED DATE (YYCWxx)",
+    "CAT2 REALISED DATE (YYCWxx)",
+    "CAT3 REALISED DATE (YYCWxx)",
+    "CAT1/2/3 TYPE",
+    "WEEKLY CAPACITY MEASURED",
+    "WEEKLY CAPACITY ESTIMATED",
+    "SHARED FOLDER - link",
+    "Comments",
+    "PART NUMBER",
+    "APQP GRID",
+  ]);
+
+  useEffect(() => {
+    if (!project.apiId) return;
+    fetchEditableColumns(project.apiId, "SQD", "CAT")
+      .then((columns) => setCustomCatFields(columns.filter((column) => !fixedCatFields.has(column))))
+      .catch(() => setCustomCatFields([]));
+  }, [project.apiId]);
 
   async function refreshRecords() {
     if (!project.apiId) return;
@@ -1464,6 +1817,43 @@ function CatWorkspace({ project, records, canEdit, user, onSaved }: { project: U
     }
   }
 
+  async function saveCustomCat() {
+    if (!project.apiId || !customPart) return;
+    if (!canEdit) {
+      setSaveState("error");
+      setMessage("Read-only: you are not assigned to this project.");
+      return;
+    }
+    const values = Object.fromEntries(
+      customCatFields
+        .map((field) => [field, customCatValues[field] ?? ""])
+        .filter(([, value]) => String(value).trim())
+    );
+    if (!Object.keys(values).length) {
+      setMessage("No customized CAT values to save.");
+      return;
+    }
+    setSaveState("saving");
+    setMessage("");
+    try {
+      await saveRoleRecord(project.apiId, {
+        part_number: customPart,
+        values,
+        role: "SQD",
+        section: "CAT",
+        create_if_missing: false,
+        updated_by: user.email,
+        actor_email: user.email,
+      });
+      await refreshRecords();
+      setSaveState("saved");
+      setMessage("Customized CAT fields saved.");
+    } catch (event) {
+      setSaveState("error");
+      setMessage(event instanceof Error ? event.message : "Unable to save customized CAT fields");
+    }
+  }
+
   return (
     <section className="page-grid">
       <div className="page-title">
@@ -1514,6 +1904,22 @@ function CatWorkspace({ project, records, canEdit, user, onSaved }: { project: U
         </div>
         <button className="primary-button full" onClick={saveResults} disabled={saveState === "saving" || !resultPart || !canEdit}>Save Section B</button>
       </div>
+
+      {customCatFields.length > 0 && (
+        <div className="panel form-panel">
+          <PanelHeader title="Customized CAT Fields" action="SQD" />
+          <label className="field part-selector">
+            <span>Select Part Number</span>
+            <PartNumberPicker records={records} value={customPart} onChange={setCustomPart} placeholder="Type PN prefix, e.g. 9 or 95" />
+          </label>
+          <div className="form-grid">
+            {customCatFields.map((field) => (
+              <Field key={field} label={field} placeholder="Enter value" value={customCatValues[field] ?? ""} onChange={(value) => setCustomCatValues((current) => ({ ...current, [field]: value }))} disabled={!canEdit} />
+            ))}
+          </div>
+          <button className="primary-button full" onClick={saveCustomCat} disabled={saveState === "saving" || !customPart || !canEdit}>Save Customized CAT Fields</button>
+        </div>
+      )}
 
       {message && <div className={saveState === "error" ? "form-error" : "form-success"}>{message}</div>}
     </section>

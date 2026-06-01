@@ -16,7 +16,7 @@ export type Role = "Capacity Manager" | "Buyer" | "SQD" | "Admin";
 export type Health = "G" | "O" | "R";
 
 export const navigation = [
-  { id: "dashboard", label: "Command Center", icon: LayoutDashboard },
+  { id: "dashboard", label: "Global Overview", icon: LayoutDashboard },
   { id: "projects", label: "Projects", icon: Factory },
   { id: "data", label: "All CMF Data", icon: Database },
   { id: "buyer", label: "Buyer Workspace", icon: PackagePlus },

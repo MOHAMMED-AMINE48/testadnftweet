@@ -119,6 +119,24 @@ class AdminRecordDirectSave(BaseModel):
     updated_by: str = "admin"
 
 
+class ProjectRecordDirectSave(BaseModel):
+    part_number: Optional[str] = None
+    apqp_grid: Optional[str] = None
+    values: Dict[str, Any] = {}
+    updated_by: str = "react-ui"
+    actor_email: Optional[str] = None
+
+
+class ActionPlanCreate(BaseModel):
+    record_id: int
+    problem_type: str
+    action_text: str
+    old_value: Optional[str] = None
+    new_value: str
+    created_by: str = "react-ui"
+    actor_email: Optional[str] = None
+
+
 class ValueUpdate(BaseModel):
     values: Dict[str, Any]
     updated_by: str = "react-ui"
@@ -509,6 +527,24 @@ def _audit_rows(limit: int = 250) -> List[Dict[str, Any]]:
         db_sqlite.close_connection(conn)
 
 
+def _action_plan_rows(project_id: int) -> List[Dict[str, Any]]:
+    conn = db_sqlite.get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, project_id, record_id, part_number, problem_type, target_column,
+                   action_text, old_value, new_value, created_by, created_at
+            FROM action_plans
+            WHERE project_id = ?
+            ORDER BY id DESC
+            """,
+            (project_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        db_sqlite.close_connection(conn)
+
+
 def _safe_excel_value(value: Any) -> str:
     if value is None:
         return ""
@@ -631,7 +667,7 @@ def _project_custom_column_names(project_id: int) -> List[str]:
     names = []
     for column in column_repo.get_columns(project_id):
         column_name = column["column_name"]
-        if get_column_section(column_name) == "CUSTOMIZED COLUMNS" and column_name not in names:
+        if column_name not in {col["name"] for col in STANDARD_COLUMNS_WITH_ROLES} and column_name not in names:
             names.append(column_name)
     return names
 
@@ -775,7 +811,7 @@ def _template_columns() -> List[str]:
                 column["column_name"]
                 for project in project_repo.get_all_projects()
                 for column in column_repo.get_columns(project.id)
-                if get_column_section(column["column_name"]) == "CUSTOMIZED COLUMNS"
+                if column["column_name"] not in {col["name"] for col in STANDARD_COLUMNS_WITH_ROLES}
                 and column["column_name"] not in template_columns
             ]
             return template_columns + list(dict.fromkeys(custom_columns))
@@ -789,6 +825,7 @@ def _project_full_rows(project_id: int) -> List[Dict[str, Any]]:
     rows = []
     for index, record in enumerate(record_repo.get_records_for_project(project_id), 1):
         row = _apply_roadmap(record.to_dict(), context)
+        row["__record_id"] = record.id
         row["CMF LINE NÂ°"] = index
         row["CMF LINE N°"] = index
         rows.append(row)
@@ -797,7 +834,7 @@ def _project_full_rows(project_id: int) -> List[Dict[str, Any]]:
 
 def _display_rows(rows: List[Dict[str, Any]], columns: List[str]) -> List[Dict[str, Any]]:
     return [
-        {column: _template_cell_value(row, column) for column in columns}
+        {"__record_id": row.get("__record_id"), **{column: _template_cell_value(row, column) for column in columns}}
         for row in rows
     ]
 
@@ -1119,6 +1156,135 @@ def project_full_data(project_id: int) -> Dict[str, Any]:
     }
 
 
+@app.patch("/api/projects/{project_id}/records/{record_id}")
+def update_project_record(project_id: int, record_id: int, payload: ProjectRecordDirectSave) -> Dict[str, Any]:
+    project = project_repo.get_project_by_id(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    _ensure_project_write_access(project, payload.actor_email)
+    existing = record_repo.get_record_by_id(record_id)
+    if not existing or existing.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Record not found")
+
+    data = dict(payload.values)
+    if payload.part_number is not None:
+        data["part_number"] = payload.part_number
+    if payload.apqp_grid is not None:
+        data["apqp_grid"] = payload.apqp_grid
+    updated = record_repo.update_record(record_id, data, payload.updated_by)
+    _write_audit_log(
+        "PROJECT_UPDATE_RECORD",
+        "cmf_record",
+        record_id,
+        payload.updated_by,
+        str(existing.to_dict()),
+        str(data),
+        project_id,
+    )
+    return {"record": _record_payload(updated)}
+
+
+@app.delete("/api/projects/{project_id}/records/{record_id}")
+def delete_project_record(project_id: int, record_id: int, actor_email: Optional[str] = None, updated_by: str = "react-ui") -> Dict[str, Any]:
+    project = project_repo.get_project_by_id(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    _ensure_project_write_access(project, actor_email)
+    existing = record_repo.get_record_by_id(record_id)
+    if not existing or existing.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Record not found")
+    if not record_repo.delete_record(record_id):
+        raise HTTPException(status_code=404, detail="Record not found")
+    _write_audit_log(
+        "PROJECT_DELETE_RECORD",
+        "cmf_record",
+        record_id,
+        updated_by,
+        str(existing.to_dict()),
+        None,
+        project_id,
+    )
+    return {"deleted": True}
+
+
+@app.get("/api/projects/{project_id}/action-plans")
+def list_action_plans(project_id: int) -> Dict[str, Any]:
+    if not project_repo.get_project_by_id(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {"action_plans": _action_plan_rows(project_id)}
+
+
+@app.post("/api/projects/{project_id}/action-plans")
+def create_action_plan(project_id: int, payload: ActionPlanCreate) -> Dict[str, Any]:
+    project = project_repo.get_project_by_id(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    _ensure_project_write_access(project, payload.actor_email, "SQD")
+    record = record_repo.get_record_by_id(payload.record_id)
+    if not record or record.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Record not found")
+
+    problem = payload.problem_type.strip()
+    if problem == "CAT Requested vs Measured":
+        target_column = MEASURED_COLUMN
+    elif problem == "GOR Requested vs Contracted":
+        target_column = CONTRACTED_COLUMN
+    else:
+        raise HTTPException(status_code=400, detail="Invalid action plan problem type")
+
+    action_text = payload.action_text.strip()
+    new_value = str(payload.new_value).strip()
+    if not action_text:
+        raise HTTPException(status_code=400, detail="Action text is required")
+    if not new_value:
+        raise HTTPException(status_code=400, detail="New value is required")
+
+    old_value = payload.old_value
+    if old_value in (None, ""):
+        old_value = str(record.to_dict().get(target_column) or "")
+
+    updated = record_repo.update_record(payload.record_id, {target_column: new_value}, payload.created_by)
+    conn = db_sqlite.get_connection()
+    try:
+        with conn:
+            cur = conn.execute(
+                """
+                INSERT INTO action_plans (
+                    project_id, record_id, part_number, problem_type, target_column,
+                    action_text, old_value, new_value, created_by
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id,
+                    payload.record_id,
+                    record.part_number,
+                    problem,
+                    target_column,
+                    action_text,
+                    old_value,
+                    new_value,
+                    payload.created_by,
+                ),
+            )
+            action_plan_id = cur.lastrowid
+    finally:
+        db_sqlite.close_connection(conn)
+
+    _write_audit_log(
+        "SQD_CREATE_ACTION_PLAN",
+        "action_plan",
+        action_plan_id,
+        payload.created_by,
+        f"{target_column}: {old_value}",
+        f"{target_column}: {new_value}; action: {action_text}",
+        project_id,
+    )
+    return {
+        "action_plan": next((plan for plan in _action_plan_rows(project_id) if plan["id"] == action_plan_id), None),
+        "record": _record_payload(updated),
+    }
+
+
 @app.get("/api/projects/{project_id}/cmf-export")
 def export_project_cmf(project_id: int):
     if not project_repo.get_project_by_id(project_id):
@@ -1186,7 +1352,7 @@ def save_role_record(project_id: int, payload: RoleRecordSave) -> Dict[str, Any]
 
     editable = set(column_repo.get_columns_for_role(project_id, payload.role))
     if payload.section:
-        editable = {column for column in editable if get_column_section(column) == payload.section}
+        editable = {column for column in editable if _column_section_for_project(project_id, column) == payload.section}
 
     values = {
         key: value

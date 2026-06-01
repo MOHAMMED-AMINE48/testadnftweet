@@ -377,6 +377,7 @@ h2 {
 .button-row {
   display: flex;
   gap: 10px;
+  flex-wrap: wrap;
 }
 
 .filter-input {
@@ -868,7 +869,17 @@ th {
   background: #fff;
 }
 
+.field textarea {
+  min-height: 110px;
+  padding: 10px 12px;
+  border: 1px solid #cfd9e6;
+  border-radius: 8px;
+  background: #fff;
+  resize: vertical;
+}
+
 .field input:focus,
+.field textarea:focus,
 .field select:focus,
 .mapping-row select:focus,
 .topbar select:focus,
@@ -876,6 +887,34 @@ th {
 .pn-picker input:focus {
   border-color: #2563eb;
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.13);
+}
+
+.action-panel {
+  display: grid;
+  gap: 16px;
+  padding: 16px;
+  border: 1px solid #dfe7f1;
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.wide-field {
+  grid-column: 1 / -1;
+}
+
+.select-col {
+  width: 64px;
+  min-width: 64px;
+  text-align: center;
+}
+
+.select-col input {
+  width: 18px;
+  height: 18px;
+}
+
+.action-plan-wrap {
+  max-height: 320px;
 }
 
 .upload-band,

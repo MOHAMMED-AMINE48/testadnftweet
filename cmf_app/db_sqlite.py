@@ -411,6 +411,22 @@ def init_db() -> None:
                 FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL
             );
 
+            CREATE TABLE IF NOT EXISTS action_plans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                record_id INTEGER NOT NULL,
+                part_number TEXT NOT NULL,
+                problem_type TEXT NOT NULL,
+                target_column TEXT NOT NULL,
+                action_text TEXT NOT NULL,
+                old_value TEXT,
+                new_value TEXT,
+                created_by TEXT NOT NULL,
+                created_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                FOREIGN KEY (record_id) REFERENCES cmf_records(id) ON DELETE CASCADE
+            );
+
             -- Créer les index pour améliorer les performances
                 CREATE INDEX IF NOT EXISTS idx_cmf_records_project_id ON cmf_records(project_id);
                 CREATE INDEX IF NOT EXISTS idx_cmf_records_part_number ON cmf_records(part_number);
@@ -423,6 +439,8 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_user_project_roles_user ON user_project_roles(user_name);
             CREATE INDEX IF NOT EXISTS idx_user_project_roles_project ON user_project_roles(project_id);
             CREATE INDEX IF NOT EXISTS idx_audit_logs_project_id ON audit_logs(project_id);
+            CREATE INDEX IF NOT EXISTS idx_action_plans_project_id ON action_plans(project_id);
+            CREATE INDEX IF NOT EXISTS idx_action_plans_record_id ON action_plans(record_id);
             """)
 
             _seed_default_project_columns(conn)

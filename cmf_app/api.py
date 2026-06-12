@@ -15,6 +15,7 @@ import base64
 import csv
 import hashlib
 import secrets
+from datetime import date, datetime
 
 APP_DIR = Path(__file__).resolve().parent
 if str(APP_DIR) not in sys.path:
@@ -83,6 +84,17 @@ CAT_VALUATION_COLUMN = "CAT1/2/3 VALUATION (G;O;R)"
 CONTRACTED_COLUMN = "WEEKLY CAPACITY CONTRACTED (Parts/Week)"
 REQUESTED_COLUMN = "LAST WEEKLY CAPACITY REQUESTED"
 MEASURED_COLUMN = "WEEKLY CAPACITY MEASURED"
+DASHBOARD_REQUIRED_FIELDS = [
+    "SUPPLIER NAME",
+    "PART NUMBER",
+    "PROGRAM BUYER / BUYER",
+    "SQE",
+    CONTRACTED_COLUMN,
+    REQUESTED_COLUMN,
+    GOR_REQUESTED_COLUMN,
+    "CAT FORECASTED DATE",
+    "SHARED FOLDER",
+]
 
 
 class CustomColumnPayload(BaseModel):
@@ -839,6 +851,335 @@ def _display_rows(rows: List[Dict[str, Any]], columns: List[str]) -> List[Dict[s
     ]
 
 
+def _dash_value(row: Dict[str, Any], *headers: str) -> str:
+    for header in headers:
+        value = _template_cell_value(row, header)
+        if str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def _dash_number(row: Dict[str, Any], *headers: str) -> Optional[float]:
+    for header in headers:
+        value = _first_number(_dash_value(row, header))
+        if value is not None:
+            return value
+    return None
+
+
+def _normalize_risk(value: Any) -> str:
+    text_value = str(value or "").strip().upper()
+    if text_value in {"G", "GREEN", "VERT", "VERTE"}:
+        return "Green"
+    if text_value in {"O", "ORANGE"}:
+        return "Orange"
+    if text_value in {"R", "RED", "ROUGE"}:
+        return "Red"
+    return "Unknown"
+
+
+def _capacity_status(contracted: Optional[float], requested: Optional[float]) -> str:
+    if contracted is None or requested is None or requested <= 0:
+        return "Unknown"
+    coverage = contracted / requested
+    if coverage >= 1:
+        return "Green"
+    if coverage >= 0.9:
+        return "Orange"
+    return "Red"
+
+
+def _parse_dashboard_date(value: Any) -> Optional[date]:
+    text_value = str(value or "").strip()
+    if not text_value:
+        return None
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text_value, fmt).date()
+        except ValueError:
+            pass
+    match = re.search(r"(?P<year>\d{2,4})\s*(?:CW|W)\s*(?P<week>\d{1,2})", text_value, re.IGNORECASE)
+    if match:
+        year = int(match.group("year"))
+        if year < 100:
+            year += 2000
+        week = max(1, min(53, int(match.group("week"))))
+        try:
+            return date.fromisocalendar(year, week, 1)
+        except ValueError:
+            return None
+    return None
+
+
+def _cat_single_status(forecast: Any, realised: Any, today: Optional[date] = None) -> str:
+    if str(realised or "").strip():
+        return "Done"
+    forecast_date = _parse_dashboard_date(forecast)
+    if not forecast_date:
+        return "Not planned"
+    today_value = today or date.today()
+    return "Late" if forecast_date < today_value else "Planned"
+
+
+def _dashboard_record(row: Dict[str, Any]) -> Dict[str, Any]:
+    requested = _dash_number(row, REQUESTED_COLUMN)
+    contracted = _dash_number(row, CONTRACTED_COLUMN, "CAPACITY CONTRACTED STEP (Parts/Week)")
+    measured = _dash_number(row, MEASURED_COLUMN)
+    gap = (contracted or 0) - (requested or 0) if contracted is not None and requested is not None else None
+    coverage = contracted / requested if contracted is not None and requested not in (None, 0) else None
+    measured_gap = (measured or 0) - (requested or 0) if measured is not None and requested is not None else None
+    measured_coverage = measured / requested if measured is not None and requested not in (None, 0) else None
+    calculated_status = _capacity_status(contracted, requested)
+    measured_status = _capacity_status(measured, requested)
+    gor = _normalize_risk(_dash_value(row, GOR_REQUESTED_COLUMN, GOR_COLUMN)) 
+    if gor == "Unknown":
+        gor = calculated_status
+
+    cat_statuses = {
+        "CAT1": _cat_single_status(_dash_value(row, "CAT1 FORECASTED DATE (YYCWxx)", "CAT1 FORECASTED DATE"), _dash_value(row, "CAT1 REALISED DATE (YYCWxx)", "CAT1 REALISED DATE")),
+        "CAT2": _cat_single_status(_dash_value(row, "CAT2 FORECASTED DATE (YYCWxx)", "CAT2 FORECASTED DATE"), _dash_value(row, "CAT2 REALISED DATE (YYCWxx)", "CAT2 REALISED DATE")),
+        "CAT3": _cat_single_status(_dash_value(row, "CAT3 FORECASTED DATE (YYCWxx)", "CAT3 FORECASTED DATE"), _dash_value(row, "CAT3 REALISED DATE (YYCWxx)", "CAT3 REALISED DATE")),
+    }
+    cat_rollup = "Late" if "Late" in cat_statuses.values() else ("Done" if all(status == "Done" for status in cat_statuses.values()) else ("Planned" if "Planned" in cat_statuses.values() else "Not planned"))
+    cat_evaluation_status = _normalize_risk(_dash_value(row, CAT_VALUATION_COLUMN, "CAT1/2/3 VALUATION"))
+
+    required_values = [
+        _dash_value(row, "SUPPLIER NAME"),
+        _dash_value(row, "PART NUMBER"),
+        _dash_value(row, "PROGRAM BUYER / BUYER"),
+        _dash_value(row, "SQE"),
+        _dash_value(row, CONTRACTED_COLUMN),
+        _dash_value(row, REQUESTED_COLUMN),
+        _dash_value(row, GOR_REQUESTED_COLUMN, GOR_COLUMN),
+        _dash_value(row, "CAT1 FORECASTED DATE (YYCWxx)", "CAT2 FORECASTED DATE (YYCWxx)", "CAT3 FORECASTED DATE (YYCWxx)"),
+        _dash_value(row, "SHARED FOLDER", "SCR - SHARED FOLDER", "SHARED FOLDER - link"),
+    ]
+    completeness = round(sum(1 for value in required_values if str(value).strip()) / len(required_values) * 100, 1)
+
+    priority = 4
+    if (
+        gor == "Red"
+        or cat_evaluation_status == "Red"
+        or cat_rollup == "Late"
+        or (gap is not None and gap < 0 and (coverage is None or coverage < 0.9))
+        or (measured_gap is not None and measured_gap < 0 and (measured_coverage is None or measured_coverage < 0.9))
+    ):
+        priority = 1
+    elif gor == "Orange" or cat_evaluation_status == "Orange" or (coverage is not None and 0.9 <= coverage < 1) or (measured_coverage is not None and 0.9 <= measured_coverage < 1):
+        priority = 2
+    elif gor == "Green" and cat_evaluation_status == "Green" and (completeness < 100 or cat_rollup == "Not planned"):
+        priority = 3
+
+    return {
+        "record_id": row.get("__record_id"),
+        "supplier_name": _dash_value(row, "SUPPLIER NAME"),
+        "country": _dash_value(row, "COUNTRY"),
+        "location": _dash_value(row, "LOCATION"),
+        "part_number": _dash_value(row, "PART NUMBER"),
+        "part_name": _dash_value(row, "PART NAME"),
+        "buyer": _dash_value(row, "PROGRAM BUYER / BUYER"),
+        "sqe": _dash_value(row, "SQE"),
+        "apqp_grid_project": _dash_value(row, "APQP Grid Project (Project Wave x)", "APQP Grid Project"),
+        "use_cases": _dash_value(row, "USE CASES"),
+        "year_of_max_need": _dash_value(row, "YEAR OF MAX NEED"),
+        "capacity_source": _dash_value(row, "CAPACITY SOURCE"),
+        "last_weekly_capacity_requested": requested,
+        "weekly_capacity_contracted": contracted,
+        "weekly_capacity_measured": measured,
+        "capacity_gap": gap,
+        "coverage_rate": coverage,
+        "capacity_status": calculated_status,
+        "measured_capacity_gap": measured_gap,
+        "measured_coverage_rate": measured_coverage,
+        "measured_capacity_status": measured_status,
+        "gor": gor,
+        "cat_status": cat_rollup,
+        "cat_statuses": cat_statuses,
+        "cat_valuation": cat_evaluation_status,
+        "cat_evaluation_status": cat_evaluation_status,
+        "capacity_workshop_done_date": _dash_value(row, "CAPACITY WORKSHOP Done date"),
+        "shared_folder_link": _dash_value(row, "SHARED FOLDER - link", "SHARED FOLDER", "SCR - SHARED FOLDER"),
+        "comments": _dash_value(row, "Comments"),
+        "data_completeness": completeness,
+        "priority": priority,
+    }
+
+
+def _dashboard_filtered_records(project_id: int, filters: Dict[str, Optional[str]]) -> List[Dict[str, Any]]:
+    records = [_dashboard_record(row) for row in _project_full_rows(project_id)]
+    filter_fields = {
+        "supplier": "supplier_name",
+        "part_number": "part_number",
+        "country": "country",
+        "location": "location",
+        "buyer": "buyer",
+        "sqe": "sqe",
+        "gor": "gor",
+        "apqp": "apqp_grid_project",
+        "use_cases": "use_cases",
+        "year": "year_of_max_need",
+        "cat_status": "cat_status",
+        "cat_evaluation_status": "cat_evaluation_status",
+        "capacity_source": "capacity_source",
+    }
+    for query_key, record_key in filter_fields.items():
+        expected = (filters.get(query_key) or "").strip().lower()
+        if expected:
+            records = [record for record in records if str(record.get(record_key) or "").strip().lower() == expected]
+    return records
+
+
+def _count_by(records: List[Dict[str, Any]], key: str) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for record in records:
+        value = str(record.get(key) or "Unknown").strip() or "Unknown"
+        counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
+def _top_counts(records: List[Dict[str, Any]], key: str, risk: str = "Red", limit: int = 10) -> List[Dict[str, Any]]:
+    counts = _count_by([record for record in records if record.get("gor") == risk], key)
+    return [{"label": label, "value": value} for label, value in sorted(counts.items(), key=lambda item: item[1], reverse=True)[:limit]]
+
+
+def _stacked_risk_by(records: List[Dict[str, Any]], group_key: str, status_key: str = "cat_evaluation_status", limit: int = 10) -> List[Dict[str, Any]]:
+    grouped: Dict[str, Dict[str, int]] = {}
+    for record in records:
+        label = str(record.get(group_key) or "Unknown").strip() or "Unknown"
+        status = str(record.get(status_key) or "Unknown").strip() or "Unknown"
+        grouped.setdefault(label, {"Green": 0, "Orange": 0, "Red": 0, "Unknown": 0})
+        grouped[label][status if status in grouped[label] else "Unknown"] += 1
+    ranked = sorted(grouped.items(), key=lambda item: (item[1]["Red"], item[1]["Orange"], item[1]["Green"]), reverse=True)
+    return [{"label": label, **counts} for label, counts in ranked[:limit]]
+
+
+def _dashboard_payload(project_id: int, filters: Dict[str, Optional[str]]) -> Dict[str, Any]:
+    records = _dashboard_filtered_records(project_id, filters)
+    all_records = [_dashboard_record(row) for row in _project_full_rows(project_id)]
+    total_requested = sum(record["last_weekly_capacity_requested"] or 0 for record in records)
+    total_contracted = sum(record["weekly_capacity_contracted"] or 0 for record in records)
+    total_measured = sum(record["weekly_capacity_measured"] or 0 for record in records)
+    missing_capacity = sum(record["capacity_gap"] or 0 for record in records if (record["capacity_gap"] or 0) < 0)
+    total_measured_gap = sum(record["measured_capacity_gap"] or 0 for record in records)
+    missing_measured_capacity = sum(record["measured_capacity_gap"] or 0 for record in records if (record["measured_capacity_gap"] or 0) < 0)
+    gor_distribution = {status: 0 for status in ["Green", "Orange", "Red", "Unknown"]}
+    gor_distribution.update(_count_by(records, "gor"))
+    measured_status_distribution = {status: 0 for status in ["Green", "Orange", "Red", "Unknown"]}
+    measured_status_distribution.update(_count_by(records, "measured_capacity_status"))
+    cat_evaluation_distribution = {status: 0 for status in ["Green", "Orange", "Red", "Unknown"]}
+    cat_evaluation_distribution.update(_count_by(records, "cat_evaluation_status"))
+
+    cat_status = {
+        cat: {status: 0 for status in ["Done", "Late", "Planned", "Not planned"]}
+        for cat in ["CAT1", "CAT2", "CAT3"]
+    }
+    for record in records:
+        for cat, status in record["cat_statuses"].items():
+            cat_status[cat][status] += 1
+
+    top_gaps = sorted(
+        [
+            {
+                "label": record["supplier_name"] or record["part_number"] or "Unknown",
+                "part_number": record["part_number"],
+                "value": record["capacity_gap"] or 0,
+            }
+            for record in records
+            if (record["capacity_gap"] or 0) < 0
+        ],
+        key=lambda item: item["value"],
+    )[:10]
+    top_measured_gaps = sorted(
+        [
+            {
+                "label": record["supplier_name"] or record["part_number"] or "Unknown",
+                "part_number": record["part_number"],
+                "value": record["measured_capacity_gap"] or 0,
+            }
+            for record in records
+            if (record["measured_capacity_gap"] or 0) < 0
+        ],
+        key=lambda item: item["value"],
+    )[:10]
+
+    cat_eval_known = sum(value for status, value in cat_evaluation_distribution.items() if status != "Unknown")
+    cat_eval_red = cat_evaluation_distribution.get("Red", 0)
+
+    priority_rows = sorted(
+        [record for record in records if record["priority"] < 4],
+        key=lambda record: (
+            record["priority"],
+            {"Red": 0, "Orange": 1, "Green": 2, "Unknown": 3}.get(str(record.get("cat_evaluation_status")), 3),
+            record["measured_capacity_gap"] if record["measured_capacity_gap"] is not None else 0,
+            record["capacity_gap"] if record["capacity_gap"] is not None else 0,
+            0 if record["cat_status"] == "Late" else 1,
+            record["supplier_name"],
+        ),
+    )[:80]
+
+    def options(key: str) -> List[str]:
+        values = sorted({str(record.get(key) or "").strip() for record in all_records if str(record.get(key) or "").strip()})
+        return values
+
+    return {
+        "summary": {
+            "total_lines": len(records),
+            "suppliers_count": len({record["supplier_name"] for record in records if record["supplier_name"]}),
+            "total_requested_capacity": total_requested,
+            "total_contracted_capacity": total_contracted,
+            "total_measured_capacity": total_measured,
+            "coverage_rate": total_contracted / total_requested if total_requested else None,
+            "measured_coverage_rate": total_measured / total_requested if total_requested else None,
+            "missing_capacity": missing_capacity,
+            "total_measured_gap": total_measured_gap,
+            "missing_measured_capacity": missing_measured_capacity,
+            "measured_insufficient_lines": sum(1 for record in records if (record["measured_capacity_gap"] or 0) < 0),
+            "red_lines": sum(1 for record in records if record["gor"] == "Red"),
+            "late_cats": sum(1 for record in records if record["cat_status"] == "Late"),
+            "cat_evaluation_green": cat_evaluation_distribution.get("Green", 0),
+            "cat_evaluation_orange": cat_evaluation_distribution.get("Orange", 0),
+            "cat_evaluation_red": cat_eval_red,
+            "cat_evaluation_unknown": cat_evaluation_distribution.get("Unknown", 0),
+            "cat_evaluation_red_rate": cat_eval_red / cat_eval_known if cat_eval_known else None,
+            "average_data_completeness": round(sum(record["data_completeness"] for record in records) / len(records), 1) if records else 0,
+        },
+        "gor_distribution": gor_distribution,
+        "measured_status_distribution": measured_status_distribution,
+        "capacity_comparison": {
+            "requested": total_requested,
+            "contracted": total_contracted,
+            "measured": total_measured,
+        },
+        "top_risk_suppliers": _top_counts(records, "supplier_name"),
+        "top_capacity_gaps": top_gaps,
+        "top_measured_capacity_gaps": top_measured_gaps,
+        "cat_status": cat_status,
+        "cat_valuation": cat_evaluation_distribution,
+        "cat_evaluation_distribution": cat_evaluation_distribution,
+        "cat_evaluation_by_supplier": _stacked_risk_by(records, "supplier_name"),
+        "cat_evaluation_by_sqe": _stacked_risk_by(records, "sqe"),
+        "cat_evaluation_by_buyer": _stacked_risk_by(records, "buyer"),
+        "risk_by_buyer": _top_counts(records, "buyer"),
+        "risk_by_country": _top_counts(records, "country"),
+        "priority_actions": priority_rows,
+        "filters": {
+            "supplier": options("supplier_name"),
+            "part_number": options("part_number"),
+            "country": options("country"),
+            "location": options("location"),
+            "buyer": options("buyer"),
+            "sqe": options("sqe"),
+            "gor": ["Green", "Orange", "Red", "Unknown"],
+            "apqp": options("apqp_grid_project"),
+            "use_cases": options("use_cases"),
+            "year": options("year_of_max_need"),
+            "cat_status": ["Done", "Late", "Planned", "Not planned"],
+            "cat_evaluation_status": ["Green", "Orange", "Red", "Unknown"],
+            "capacity_source": options("capacity_source"),
+        },
+    }
+
+
 def _template_cell_value(row: Dict[str, Any], header: Any) -> str:
     for candidate in _template_aliases(_normalized_header(header)):
         if candidate in row:
@@ -1154,6 +1495,106 @@ def project_full_data(project_id: int) -> Dict[str, Any]:
         "default_visible": [column for column in REACT_DEFAULT_VIEW_COLS if column in columns],
         "records": _display_rows(rows, columns),
     }
+
+
+@app.get("/api/projects/{project_id}/dashboard")
+def project_dashboard(
+    project_id: int,
+    supplier: Optional[str] = None,
+    part_number: Optional[str] = None,
+    country: Optional[str] = None,
+    location: Optional[str] = None,
+    buyer: Optional[str] = None,
+    sqe: Optional[str] = None,
+    gor: Optional[str] = None,
+    apqp: Optional[str] = None,
+    use_cases: Optional[str] = None,
+    year: Optional[str] = None,
+    cat_status: Optional[str] = None,
+    cat_evaluation_status: Optional[str] = None,
+    capacity_source: Optional[str] = None,
+) -> Dict[str, Any]:
+    if not project_repo.get_project_by_id(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    filters = {
+        "supplier": supplier,
+        "part_number": part_number,
+        "country": country,
+        "location": location,
+        "buyer": buyer,
+        "sqe": sqe,
+        "gor": gor,
+        "apqp": apqp,
+        "use_cases": use_cases,
+        "year": year,
+        "cat_status": cat_status,
+        "cat_evaluation_status": cat_evaluation_status,
+        "capacity_source": capacity_source,
+    }
+    return _dashboard_payload(project_id, filters)
+
+
+@app.get("/api/cmf/dashboard/summary")
+def dashboard_summary(project_id: int, cat_evaluation_status: Optional[str] = None) -> Dict[str, Any]:
+    if not project_repo.get_project_by_id(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {"summary": _dashboard_payload(project_id, {"cat_evaluation_status": cat_evaluation_status})["summary"]}
+
+
+@app.get("/api/cmf/dashboard/gor-distribution")
+def dashboard_gor_distribution(project_id: int) -> Dict[str, Any]:
+    if not project_repo.get_project_by_id(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {"gor_distribution": _dashboard_payload(project_id, {})["gor_distribution"]}
+
+
+@app.get("/api/cmf/dashboard/top-risk-suppliers")
+def dashboard_top_risk_suppliers(project_id: int) -> Dict[str, Any]:
+    if not project_repo.get_project_by_id(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {"top_risk_suppliers": _dashboard_payload(project_id, {})["top_risk_suppliers"]}
+
+
+@app.get("/api/cmf/dashboard/capacity-gaps")
+def dashboard_capacity_gaps(project_id: int) -> Dict[str, Any]:
+    if not project_repo.get_project_by_id(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {"top_capacity_gaps": _dashboard_payload(project_id, {})["top_capacity_gaps"]}
+
+
+@app.get("/api/cmf/dashboard/cat-status")
+def dashboard_cat_status(project_id: int) -> Dict[str, Any]:
+    if not project_repo.get_project_by_id(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {"cat_status": _dashboard_payload(project_id, {})["cat_status"]}
+
+
+@app.get("/api/cmf/dashboard/action-plan")
+def dashboard_action_plan(project_id: int, cat_evaluation_status: Optional[str] = None) -> Dict[str, Any]:
+    if not project_repo.get_project_by_id(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {"priority_actions": _dashboard_payload(project_id, {"cat_evaluation_status": cat_evaluation_status})["priority_actions"]}
+
+
+@app.get("/api/cmf/dashboard/filters")
+def dashboard_filters(project_id: int) -> Dict[str, Any]:
+    if not project_repo.get_project_by_id(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {"filters": _dashboard_payload(project_id, {})["filters"]}
+
+
+@app.get("/api/cmf/dashboard/measured-capacity-gaps")
+def dashboard_measured_capacity_gaps(project_id: int, cat_evaluation_status: Optional[str] = None) -> Dict[str, Any]:
+    if not project_repo.get_project_by_id(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {"top_measured_capacity_gaps": _dashboard_payload(project_id, {"cat_evaluation_status": cat_evaluation_status})["top_measured_capacity_gaps"]}
+
+
+@app.get("/api/cmf/dashboard/cat-evaluation-distribution")
+def dashboard_cat_evaluation_distribution(project_id: int, cat_evaluation_status: Optional[str] = None) -> Dict[str, Any]:
+    if not project_repo.get_project_by_id(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {"cat_evaluation_distribution": _dashboard_payload(project_id, {"cat_evaluation_status": cat_evaluation_status})["cat_evaluation_distribution"]}
 
 
 @app.patch("/api/projects/{project_id}/records/{record_id}")

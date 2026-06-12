@@ -33,6 +33,48 @@ export type ApiFullData = {
   records: Array<Record<string, unknown>>;
 };
 
+export type ApiDashboardFilters = Record<string, string>;
+
+export type ApiDashboard = {
+  summary: {
+    total_lines: number;
+    suppliers_count: number;
+    total_requested_capacity: number;
+    total_contracted_capacity: number;
+    total_measured_capacity: number;
+    coverage_rate: number | null;
+    measured_coverage_rate: number | null;
+    missing_capacity: number;
+    total_measured_gap: number;
+    missing_measured_capacity: number;
+    measured_insufficient_lines: number;
+    red_lines: number;
+    late_cats: number;
+    cat_evaluation_green: number;
+    cat_evaluation_orange: number;
+    cat_evaluation_red: number;
+    cat_evaluation_unknown: number;
+    cat_evaluation_red_rate: number | null;
+    average_data_completeness: number;
+  };
+  gor_distribution: Record<string, number>;
+  measured_status_distribution: Record<string, number>;
+  capacity_comparison: { requested: number; contracted: number; measured: number };
+  top_risk_suppliers: Array<{ label: string; value: number }>;
+  top_capacity_gaps: Array<{ label: string; part_number: string; value: number }>;
+  top_measured_capacity_gaps: Array<{ label: string; part_number: string; value: number }>;
+  cat_status: Record<string, Record<string, number>>;
+  cat_valuation: Record<string, number>;
+  cat_evaluation_distribution: Record<string, number>;
+  cat_evaluation_by_supplier: Array<Record<string, string | number>>;
+  cat_evaluation_by_sqe: Array<Record<string, string | number>>;
+  cat_evaluation_by_buyer: Array<Record<string, string | number>>;
+  risk_by_buyer: Array<{ label: string; value: number }>;
+  risk_by_country: Array<{ label: string; value: number }>;
+  priority_actions: Array<Record<string, unknown>>;
+  filters: Record<string, string[]>;
+};
+
 export type ApiCrossProject = {
   projects: string[];
   records: Array<Record<string, unknown>>;
@@ -134,6 +176,15 @@ export async function fetchProjectColumns(projectId: number): Promise<ApiProject
 
 export async function fetchProjectFullData(projectId: number): Promise<ApiFullData> {
   return getJson<ApiFullData>(`/projects/${projectId}/full-data`);
+}
+
+export async function fetchProjectDashboard(projectId: number, filters: ApiDashboardFilters = {}): Promise<ApiDashboard> {
+  const params = new URLSearchParams();
+  Object.entries(filters).forEach(([key, value]) => {
+    if (value) params.set(key, value);
+  });
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return getJson<ApiDashboard>(`/projects/${projectId}/dashboard${suffix}`);
 }
 
 export async function updateProjectRecord(projectId: number, recordId: number, payload: {

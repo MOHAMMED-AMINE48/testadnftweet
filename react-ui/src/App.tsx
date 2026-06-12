@@ -31,6 +31,7 @@ import {
   deleteUser,
   downloadProjectCmfExport,
   fetchActionPlans,
+  fetchProjectDashboard,
   fetchEditableColumns,
   fetchCrossProject,
   fetchProjectFullData,
@@ -50,6 +51,8 @@ import {
   updateUserRole,
   updateUserPassword,
   type ApiProject,
+  type ApiDashboard,
+  type ApiDashboardFilters,
   type ApiRecord,
   type ApiCrossProject,
   type ApiProjectColumn,
@@ -63,6 +66,7 @@ import { cmfColumns, fileColumns, projects, records, sections, type Health } fro
 type AppRole = "Buyer" | "Capacity Manager" | "SQD" | "Admin";
 type ViewId =
   | "command"
+  | "cmf-dashboard"
   | "buyer-part-data"
   | "weekly-capacity"
   | "cross-project"
@@ -78,29 +82,33 @@ type ViewId =
 
 const roleNavigation: Record<AppRole, Array<{ id: ViewId; label: string; icon: typeof LayoutDashboard }>> = {
   Buyer: [
-    { id: "command", label: "Global Overview", icon: LayoutDashboard },
+    { id: "cmf-dashboard", label: "CMF Dashboard", icon: Gauge },
+    { id: "command", label: "CMF Data", icon: LayoutDashboard },
     { id: "buyer-part-data", label: "Part Data", icon: PackagePlus },
     { id: "weekly-capacity", label: "Weekly Contracted Capacity", icon: Gauge },
     { id: "cross-project", label: "VEHICULES ROAD MAP", icon: ArrowRight },
   ],
   "Capacity Manager": [
-    { id: "command", label: "Global Overview", icon: LayoutDashboard },
+    { id: "cmf-dashboard", label: "CMF Dashboard", icon: Gauge },
+    { id: "command", label: "CMF Data", icon: LayoutDashboard },
     { id: "manage-projects", label: "Manage Projects", icon: Settings },
     { id: "create-project", label: "Create Project", icon: Plus },
     { id: "capacity-sizing", label: "CAPACITY SIZING", icon: Gauge },
-    { id: "capacity-workshop", label: "CAPACITY WORKSHOP (STEP 2)", icon: FileUp },
+    { id: "capacity-workshop", label: "CAPACITY WORKSHOP", icon: FileUp },
     { id: "cross-project", label: "VEHICULES ROAD MAP", icon: ArrowRight },
   ],
   SQD: [
-    { id: "command", label: "Global Overview", icon: LayoutDashboard },
+    { id: "cmf-dashboard", label: "CMF Dashboard", icon: Gauge },
+    { id: "command", label: "CMF Data", icon: LayoutDashboard },
     { id: "sqd-part-data", label: "PART DATA", icon: PackagePlus },
     { id: "supplier-information", label: "SUPPLIER INFORMATION", icon: Users },
-    { id: "capacity-workshop", label: "CAPACITY WORKSHOP (STEP 2)", icon: FileUp },
+    { id: "capacity-workshop", label: "CAPACITY WORKSHOP", icon: FileUp },
     { id: "cat", label: "CAT", icon: ShieldCheck },
     { id: "cross-project", label: "VEHICULES ROAD MAP", icon: ArrowRight },
   ],
   Admin: [
-    { id: "command", label: "Global Overview", icon: LayoutDashboard },
+    { id: "cmf-dashboard", label: "CMF Dashboard", icon: Gauge },
+    { id: "command", label: "CMF Data", icon: LayoutDashboard },
     { id: "manage-projects", label: "Manage Projects", icon: Settings },
     { id: "create-project", label: "Create Project", icon: Plus },
     { id: "buyer-part-data", label: "Buyer Page", icon: PackagePlus },
@@ -323,7 +331,7 @@ function App() {
     return stored ? JSON.parse(stored) as ApiUser : null;
   });
   const role = currentUser ? apiRoleToAppRole(currentUser.role) : "Buyer";
-  const [activeView, setActiveView] = useState<ViewId>("command");
+  const [activeView, setActiveView] = useState<ViewId>("cmf-dashboard");
   const [projectList, setProjectList] = useState<UIProject[]>(projects);
   const [recordList, setRecordList] = useState<UIRecord[]>(records);
   const [selectedProject, setSelectedProject] = useState(projects[0].id);
@@ -340,7 +348,7 @@ function App() {
   function handleLogout() {
     localStorage.removeItem("cmf_user");
     setCurrentUser(null);
-    setActiveView("command");
+    setActiveView("cmf-dashboard");
   }
 
   useEffect(() => {
@@ -433,6 +441,9 @@ function App() {
             canEdit={Boolean(currentCanEdit)}
             onRecordsChanged={setRecordList}
           />
+        )}
+        {activeView === "cmf-dashboard" && (
+          <CmfDashboard project={project} />
         )}
         {activeView === "manage-projects" && (
           <Projects
@@ -607,20 +618,23 @@ function Dashboard({
   const redParts = records.filter((record) => partRisk(record) === "R").length;
   const orangeParts = records.filter((record) => partRisk(record) === "O").length;
   const greenParts = records.filter((record) => partRisk(record) === "G").length;
+  const catEvalConfirmed = records.filter((record) => record.cat === "G").length;
+  const catEvalOngoing = records.filter((record) => record.cat === "O").length;
+  const catEvalCritical = records.filter((record) => record.cat === "R").length;
   const readiness = [
     { label: "Part number", value: readinessPercent(records, (record) => Boolean(record.part.trim())), icon: PackagePlus },
     { label: "Requested Capacity", value: readinessPercent(records, (record) => record.requested > 0), icon: Gauge },
     { label: "Contracted", value: readinessPercent(records, (record) => record.contracted > 0), icon: Database },
-    { label: "Mesured", value: readinessPercent(records, (record) => record.measured > 0), icon: ShieldCheck },
+    { label: "Measured", value: readinessPercent(records, (record) => record.measured > 0), icon: ShieldCheck },
   ];
 
   return (
     <section className="page-grid">
       <div className="page-title">
         <div>
-          <span className="eyebrow">{role} Global Overview</span>
-          <h1>Global Overview</h1>
-          <p>{project.project} / {project.partOfProject} workspace with CMF readiness and the complete project data table.</p>
+          <span className="eyebrow">{role} CMF data</span>
+          <h1>CMF Data</h1>
+          <p>{project.project} / {project.partOfProject} workspace with readiness metrics and the complete project CMF table.</p>
         </div>
       </div>
 
@@ -629,6 +643,9 @@ function Dashboard({
         <Metric label="Number of Red Parts" value={String(redParts)} detail="CAT/GOR hierarchy" tone="R" />
         <Metric label="Number of Orange Parts" value={String(orangeParts)} detail="CAT/GOR hierarchy" tone="O" />
         <Metric label="Number of Green Parts" value={String(greenParts)} detail="CAT and GOR green" tone="G" />
+        <Metric label="CAT Eval Green" value={String(catEvalConfirmed)} detail="CAT valuation Confirmed" tone="G" />
+        <Metric label="CAT Eval Orange" value={String(catEvalOngoing)} detail="CAT valuation Ongoing" tone="O" />
+        <Metric label="CAT Eval Red" value={String(catEvalCritical)} detail="CAT valuation Critical" tone="R" />
       </div>
 
       <div className="panel wide">
@@ -655,7 +672,7 @@ function Dashboard({
       <FullCmfGrid
         project={project}
         fallbackRecords={records}
-        title="Project CMF Data"
+        title="CMF Data"
         embedded
         canEdit={canEdit}
         role={role}
@@ -663,6 +680,359 @@ function Dashboard({
         onRecordsChanged={onRecordsChanged}
       />
     </section>
+  );
+}
+
+const dashboardFilterLabels: Record<string, string> = {
+  supplier: "Supplier Name",
+  part_number: "Part Number",
+  country: "Country",
+  location: "Location",
+  buyer: "Buyer",
+  sqe: "SQE",
+  gor: "GOR",
+  apqp: "APQP Grid Project",
+  use_cases: "Use Cases",
+  year: "Year of Max Need",
+  cat_status: "CAT Status",
+  cat_evaluation_status: "CAT Evaluation",
+  capacity_source: "Capacity Source",
+};
+
+function CmfDashboard({ project }: { project: UIProject }) {
+  const [dashboard, setDashboard] = useState<ApiDashboard | null>(null);
+  const [filters, setFilters] = useState<ApiDashboardFilters>({});
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!project?.apiId) {
+      setDashboard(null);
+      setError("Dashboard data requires a SQLite project.");
+      return;
+    }
+    setLoading(true);
+    setError("");
+    fetchProjectDashboard(project.apiId, filters)
+      .then(setDashboard)
+      .catch((event) => setError(event instanceof Error ? event.message : "Unable to load dashboard"))
+      .finally(() => setLoading(false));
+  }, [project?.apiId, filters]);
+
+  const summary = dashboard?.summary;
+  const resetFilters = () => setFilters({});
+
+  return (
+    <section className="page-grid cmf-dashboard">
+      <div className="page-title">
+        <div>
+          <span className="eyebrow">Capacity performance</span>
+          <h1>CMF Dashboard</h1>
+          <p>{project.project} / {project.partOfProject} risk, capacity coverage, CAT progress, data quality, and priority actions.</p>
+        </div>
+        <button className="secondary-button" onClick={resetFilters} disabled={!Object.values(filters).some(Boolean)}>
+          Reset filters
+        </button>
+      </div>
+
+      {error && <div className="form-error">{error}</div>}
+
+      <div className="dashboard-filters panel">
+        {Object.entries(dashboardFilterLabels).map(([key, label]) => (
+          <label className="dashboard-filter" key={key}>
+            <span>{label}</span>
+            <select
+              value={filters[key] ?? ""}
+              onChange={(event) => setFilters((current) => ({ ...current, [key]: event.target.value }))}
+              disabled={!dashboard}
+            >
+              <option value="">All</option>
+              {(dashboard?.filters[key] ?? []).map((option) => (
+                <option value={option} key={option}>{option}</option>
+              ))}
+            </select>
+          </label>
+        ))}
+      </div>
+
+      <div className="metrics-grid dashboard-kpis">
+        <Metric label="Total CMF Lines" value={loading ? "..." : formatInteger(summary?.total_lines)} detail="Filtered records" />
+        <Metric label="Suppliers" value={loading ? "..." : formatInteger(summary?.suppliers_count)} detail="Distinct supplier names" />
+        <Metric label="Coverage Rate" value={formatPercentValue(summary?.coverage_rate)} detail="Contracted / requested" tone={coverageTone(summary?.coverage_rate)} />
+        <Metric label="Red Lines" value={formatInteger(summary?.red_lines)} detail="Critical GOR status" tone="R" />
+        <Metric label="CAT Late" value={formatInteger(summary?.late_cats)} detail="Forecast passed, not realised" tone={summary?.late_cats ? "O" : "G"} />
+        <Metric label="Missing Capacity" value={formatCapacity(summary?.missing_capacity)} detail="Negative gaps only" tone={summary?.missing_capacity ? "R" : "G"} />
+        <Metric label="Requested Capacity" value={formatCapacity(summary?.total_requested_capacity)} detail="Total weekly requested" />
+        <Metric label="Contracted Capacity" value={formatCapacity(summary?.total_contracted_capacity)} detail="Total weekly contracted" />
+        <Metric label="Measured Capacity" value={formatCapacity(summary?.total_measured_capacity)} detail="Total weekly measured" />
+        <Metric label="Measured Coverage" value={formatPercentValue(summary?.measured_coverage_rate)} detail="Measured / requested" tone={coverageTone(summary?.measured_coverage_rate)} />
+        <Metric label="Measured Missing" value={formatCapacity(summary?.missing_measured_capacity)} detail="Measured negative gaps" tone={summary?.missing_measured_capacity ? "R" : "G"} />
+        <Metric label="Measured Insufficient" value={formatInteger(summary?.measured_insufficient_lines)} detail="Measured gap below zero" tone={summary?.measured_insufficient_lines ? "R" : "G"} />
+        <Metric label="CAT Eval Green" value={formatInteger(summary?.cat_evaluation_green)} detail="CAT valuation Confirmed" tone="G" />
+        <Metric label="CAT Eval Orange" value={formatInteger(summary?.cat_evaluation_orange)} detail="CAT valuation Ongoing" tone="O" />
+        <Metric label="CAT Eval Red" value={formatInteger(summary?.cat_evaluation_red)} detail="CAT valuation Critical" tone="R" />
+        <Metric label="CAT Eval Red Rate" value={formatPercentValue(summary?.cat_evaluation_red_rate)} detail="Red / known CAT eval" tone={riskRateTone(summary?.cat_evaluation_red_rate)} />
+      </div>
+
+      {dashboard && (
+        <>
+          <div className="dashboard-row two">
+            <DonutPanel title="G/O/R Distribution" data={dashboard.gor_distribution} />
+            <CapacityComparison requested={dashboard.capacity_comparison.requested} contracted={dashboard.capacity_comparison.contracted} />
+          </div>
+
+          <div className="dashboard-row two">
+            <DonutPanel title="Measured Capacity Status" data={dashboard.measured_status_distribution} />
+            <MeasuredComparison requested={dashboard.capacity_comparison.requested} measured={dashboard.capacity_comparison.measured} />
+          </div>
+
+          <div className="dashboard-row two">
+            <BarPanel title="Top 10 Red Suppliers" data={dashboard.top_risk_suppliers} valueSuffix=" lines" />
+            <BarPanel title="Top 10 Capacity Gaps" data={dashboard.top_capacity_gaps.map((item) => ({ label: `${item.label}${item.part_number ? ` / ${item.part_number}` : ""}`, value: item.value }))} valueSuffix=" parts/wk" negative />
+          </div>
+
+          <div className="dashboard-row two">
+            <BarPanel title="Top 10 Measured Capacity Gaps" data={dashboard.top_measured_capacity_gaps.map((item) => ({ label: `${item.label}${item.part_number ? ` / ${item.part_number}` : ""}`, value: item.value }))} valueSuffix=" parts/wk" negative />
+            <DonutPanel title="CAT Evaluation G/O/R" data={dashboard.cat_evaluation_distribution} />
+          </div>
+
+          <div className="dashboard-row two">
+            <CatStatusPanel data={dashboard.cat_status} />
+            <StackedRiskPanel title="CAT Evaluation by Supplier" data={dashboard.cat_evaluation_by_supplier} />
+          </div>
+
+          <div className="dashboard-row two">
+            <BarPanel title="Red Risk by Buyer" data={dashboard.risk_by_buyer} valueSuffix=" lines" />
+            <BarPanel title="Red Risk by Country" data={dashboard.risk_by_country} valueSuffix=" lines" />
+          </div>
+
+          <PriorityActionsTable rows={dashboard.priority_actions} />
+        </>
+      )}
+    </section>
+  );
+}
+
+function DonutPanel({ title, data }: { title: string; data: Record<string, number> }) {
+  const order = ["Green", "Orange", "Red", "Unknown"];
+  const colors: Record<string, string> = { Green: "#16a34a", Orange: "#f59e0b", Red: "#dc2626", Unknown: "#94a3b8" };
+  const total = order.reduce((sum, key) => sum + (data[key] ?? 0), 0);
+  let cursor = 0;
+  const gradient = total
+    ? order.map((key) => {
+        const value = data[key] ?? 0;
+        const start = cursor;
+        const end = cursor + (value / total) * 100;
+        cursor = end;
+        return `${colors[key]} ${start}% ${end}%`;
+      }).join(", ")
+    : "#e2e8f0 0% 100%";
+
+  return (
+    <div className="panel chart-panel">
+      <PanelHeader title={title} action={`${total} lines`} />
+      <div className="donut-layout">
+        <div className="donut" style={{ background: `conic-gradient(${gradient})` }}>
+          <div><strong>{total}</strong><span>Total</span></div>
+        </div>
+        <div className="legend-list">
+          {order.map((key) => (
+            <div className="legend-item" key={key}>
+              <span className="legend-dot" style={{ background: colors[key] }} />
+              <span>{key}</span>
+              <strong>{data[key] ?? 0}</strong>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CapacityComparison({ requested, contracted }: { requested: number; contracted: number }) {
+  const maxValue = Math.max(requested, contracted, 1);
+  return (
+    <div className="panel chart-panel">
+      <PanelHeader title="Requested vs Contracted Capacity" action={formatPercentValue(contracted / maxValue)} />
+      <div className="comparison-bars">
+        <ComparisonBar label="Requested" value={requested} maxValue={maxValue} color="#2563eb" />
+        <ComparisonBar label="Contracted" value={contracted} maxValue={maxValue} color="#16a34a" />
+      </div>
+    </div>
+  );
+}
+
+function MeasuredComparison({ requested, measured }: { requested: number; measured: number }) {
+  const maxValue = Math.max(requested, measured, 1);
+  return (
+    <div className="panel chart-panel">
+      <PanelHeader title="Requested vs Measured Capacity" action={formatPercentValue(measured / maxValue)} />
+      <div className="comparison-bars">
+        <ComparisonBar label="Requested" value={requested} maxValue={maxValue} color="#2563eb" />
+        <ComparisonBar label="Measured" value={measured} maxValue={maxValue} color="#7c3aed" />
+      </div>
+    </div>
+  );
+}
+
+function ComparisonBar({ label, value, maxValue, color }: { label: string; value: number; maxValue: number; color: string }) {
+  return (
+    <div className="comparison-row">
+      <div>
+        <strong>{label}</strong>
+        <span>{formatCapacity(value)}</span>
+      </div>
+      <div className="comparison-track">
+        <span style={{ width: `${Math.max(2, (value / maxValue) * 100)}%`, background: color }} />
+      </div>
+    </div>
+  );
+}
+
+function StackedRiskPanel({ title, data }: { title: string; data: Array<Record<string, string | number>> }) {
+  const statuses = [
+    { key: "Red", color: "#dc2626" },
+    { key: "Orange", color: "#f59e0b" },
+    { key: "Green", color: "#16a34a" },
+    { key: "Unknown", color: "#94a3b8" },
+  ];
+  return (
+    <div className="panel chart-panel compact-chart">
+      <PanelHeader title={title} action={`${data.length} groups`} />
+      <div className="stacked-risk-list">
+        {data.length === 0 && <div className="empty-state">No matching records.</div>}
+        {data.map((item) => {
+          const label = String(item.label ?? "Unknown");
+          const total = statuses.reduce((sum, status) => sum + Number(item[status.key] ?? 0), 0) || 1;
+          return (
+            <div className="stacked-risk-row" key={label}>
+              <span title={label}>{label}</span>
+              <div className="stacked-risk-bar">
+                {statuses.map((status) => (
+                  <i
+                    key={status.key}
+                    title={`${status.key}: ${item[status.key] ?? 0}`}
+                    style={{
+                      width: `${(Number(item[status.key] ?? 0) / total) * 100}%`,
+                      background: status.color,
+                    }}
+                  />
+                ))}
+              </div>
+              <strong>{total}</strong>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function BarPanel({ title, data, valueSuffix = "", negative = false }: { title: string; data: Array<{ label: string; value: number }>; valueSuffix?: string; negative?: boolean }) {
+  const maxValue = Math.max(...data.map((item) => Math.abs(item.value)), 1);
+  return (
+    <div className="panel chart-panel">
+      <PanelHeader title={title} action={`${data.length} items`} />
+      <div className="bar-list">
+        {data.length === 0 && <div className="empty-state">No matching records.</div>}
+        {data.map((item) => (
+          <div className="bar-row" key={`${item.label}-${item.value}`}>
+            <span title={item.label}>{item.label || "Unknown"}</span>
+            <div className="bar-track">
+              <i style={{ width: `${Math.max(3, (Math.abs(item.value) / maxValue) * 100)}%` }} className={negative ? "negative" : ""} />
+            </div>
+            <strong>{formatBarValue(item.value)}{valueSuffix}</strong>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CatStatusPanel({ data }: { data: Record<string, Record<string, number>> }) {
+  const statuses = ["Done", "Late", "Planned", "Not planned"];
+  return (
+    <div className="panel chart-panel">
+      <PanelHeader title="CAT1 / CAT2 / CAT3 Follow-up" action="Status mix" />
+      <div className="cat-status-grid">
+        {Object.entries(data).map(([cat, values]) => {
+          const total = statuses.reduce((sum, status) => sum + (values[status] ?? 0), 0) || 1;
+          return (
+            <div className="cat-card" key={cat}>
+              <strong>{cat}</strong>
+              <div className="stacked-bar">
+                {statuses.map((status) => (
+                  <span
+                    className={`cat-${status.toLowerCase().replace(" ", "-")}`}
+                    style={{ width: `${((values[status] ?? 0) / total) * 100}%` }}
+                    key={status}
+                    title={`${status}: ${values[status] ?? 0}`}
+                  />
+                ))}
+              </div>
+              <div className="cat-mini-grid">
+                {statuses.map((status) => <span key={status}>{status}: <b>{values[status] ?? 0}</b></span>)}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function PriorityActionsTable({ rows }: { rows: Array<Record<string, unknown>> }) {
+  const columns = [
+    ["priority", "Priority"],
+    ["supplier_name", "Supplier Name"],
+    ["country", "Country"],
+    ["location", "Location"],
+    ["part_number", "Part Number"],
+    ["part_name", "Part Name"],
+    ["buyer", "Buyer"],
+    ["sqe", "SQE"],
+    ["last_weekly_capacity_requested", "Requested"],
+    ["weekly_capacity_contracted", "Contracted"],
+    ["weekly_capacity_measured", "Measured"],
+    ["capacity_gap", "Capacity Gap"],
+    ["coverage_rate", "Coverage Rate"],
+    ["measured_capacity_gap", "Measured Gap"],
+    ["measured_coverage_rate", "Measured Coverage"],
+    ["measured_capacity_status", "Measured Status"],
+    ["gor", "GOR"],
+    ["cat_status", "CAT Status"],
+    ["cat_evaluation_status", "CAT Evaluation"],
+    ["capacity_workshop_done_date", "Workshop Done"],
+    ["shared_folder_link", "Shared Folder"],
+    ["comments", "Comments"],
+  ];
+  return (
+    <div className="panel priority-panel">
+      <PanelHeader title="Priority Actions" action={`${rows.length} rows`} />
+      <div className="table-wrap priority-wrap">
+        <table>
+          <thead>
+            <tr>
+              {columns.map(([, label]) => <th key={label}>{label}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, index) => (
+              <tr key={`${row.record_id ?? index}-${index}`}>
+                {columns.map(([key]) => (
+                  <td key={key} className={["gor", "cat_evaluation_status", "measured_capacity_status"].includes(key) ? `risk-cell ${riskClass(row[key])}` : ""}>
+                    {formatDashboardCell(key, row[key])}
+                  </td>
+                ))}
+              </tr>
+            ))}
+            {rows.length === 0 && (
+              <tr><td colSpan={columns.length}>No priority action for the current filters.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 
@@ -1058,7 +1428,7 @@ function Projects({
 function FullCmfGrid({
   project,
   fallbackRecords,
-  title = "Project CMF Data",
+  title = "CMF Data",
   embedded = false,
   canEdit = false,
   role = "Buyer",
@@ -1582,7 +1952,7 @@ function DataGrid({ compact = false, records, title = "All CMF Data" }: { compac
           </div>
         </div>
       )}
-      {compact && <PanelHeader title="Project CMF Data" action="Copy / filter cells" />}
+      {compact && <PanelHeader title="CMF Data" action="Copy / filter cells" />}
       <div className="table-wrap excel-wrap">
         <table className="excel-table">
           <thead>
@@ -1654,7 +2024,7 @@ function CapacityWorkspace({
   user: ApiUser;
   onSaved: (records: UIRecord[]) => void;
 }) {
-  return <Workspace project={project} records={records} onSaved={onSaved} title={section} subtitle="Capacity Manager can update capacity-owned columns on existing CMF records." role="CAPACITY_MANAGER" section={section} createIfMissing={false} mustSelectExisting canEdit={canEdit} user={user} />;
+  return <Workspace project={project} records={records} onSaved={onSaved} title={section === "CAPACITY WORKSHOP (STEP 2)" ? "CAPACITY WORKSHOP" : section} subtitle="Capacity Manager can update capacity-owned columns on existing CMF records." role="CAPACITY_MANAGER" section={section} createIfMissing={false} mustSelectExisting canEdit={canEdit} user={user} />;
 }
 
 function SqdCapacityWorkshop({
@@ -1675,7 +2045,7 @@ function SqdCapacityWorkshop({
       project={project}
       records={records}
       onSaved={onSaved}
-      title="CAPACITY WORKSHOP (STEP 2)"
+      title="CAPACITY WORKSHOP"
       subtitle="SQD can update SQD-owned workshop fields on existing CMF records."
       role="SQD"
       section="CAPACITY WORKSHOP (STEP 2)"
@@ -2547,6 +2917,56 @@ function ImportStudio() {
       </div>
     </section>
   );
+}
+
+function formatInteger(value: unknown): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "0";
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(value);
+}
+
+function formatCapacity(value: unknown): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "0";
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(value);
+}
+
+function formatBarValue(value: number): string {
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(value);
+}
+
+function formatPercentValue(value: unknown): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "0%";
+  return `${Math.round(value * 100)}%`;
+}
+
+function coverageTone(value: unknown): Health | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  if (value >= 1) return "G";
+  if (value >= 0.9) return "O";
+  return "R";
+}
+
+function riskRateTone(value: unknown): Health | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  if (value === 0) return "G";
+  if (value < 0.15) return "O";
+  return "R";
+}
+
+function riskClass(value: unknown): string {
+  const text = String(value ?? "").toLowerCase();
+  if (text.includes("green")) return "risk-green";
+  if (text.includes("orange")) return "risk-orange";
+  if (text.includes("red")) return "risk-red";
+  return "risk-unknown";
+}
+
+function formatDashboardCell(key: string, value: unknown): string {
+  if (key === "coverage_rate" || key === "measured_coverage_rate") return formatPercentValue(value);
+  if (["last_weekly_capacity_requested", "weekly_capacity_contracted", "weekly_capacity_measured", "capacity_gap", "measured_capacity_gap"].includes(key)) {
+    return typeof value === "number" && Number.isFinite(value) ? formatCapacity(value) : "";
+  }
+  if (key === "priority") return value ? `P${value}` : "";
+  return String(value ?? "");
 }
 
 function Metric({ label, value, detail, tone }: { label: string; value: string; detail: string; tone?: Health }) {
